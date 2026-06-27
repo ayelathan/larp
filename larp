@@ -1059,27 +1059,92 @@ local function getBountyTaskType(scriptStateADT)
     end
     return string.lower(tostring(scriptStateADT.Type or scriptStateADT.type or ""))
 end
+
+activeStates.BGSI_Lite_GetBountyTaskSearchText = function(scriptStateTask, seenTasks, depth)
+    scriptStateTask = normalizeBountyTask(scriptStateTask)
+    if type(scriptStateTask) ~= "table" then
+        return string.lower(tostring(scriptStateTask or ""))
+    end
+    seenTasks = seenTasks or {}
+    depth = tonumber(depth) or 0
+    if seenTasks[scriptStateTask] or depth > 3 then
+        return ""
+    end
+    seenTasks[scriptStateTask] = true
+    local taskTextParts = {}
+    for _, taskTextKey in ipairs({
+        "Type",
+        "type",
+        "Name",
+        "name",
+        "Title",
+        "title",
+        "Description",
+        "description",
+        "Text",
+        "text",
+        "DisplayName",
+        "displayName",
+        "Objective",
+        "objective",
+        "Task",
+        "task",
+    }) do
+        local taskTextValue = rawget(scriptStateTask, taskTextKey)
+        if type(taskTextValue) == "string" then
+            table.insert(taskTextParts, taskTextValue)
+        elseif type(taskTextValue) == "table" then
+            table.insert(taskTextParts, activeStates.BGSI_Lite_GetBountyTaskSearchText(taskTextValue, seenTasks, depth + 1))
+        end
+    end
+    if type(scriptStateTask.Item) == "table" then
+        table.insert(taskTextParts, activeStates.BGSI_Lite_GetBountyTaskSearchText(scriptStateTask.Item, seenTasks, depth + 1))
+    end
+    return string.lower(table.concat(taskTextParts, " "))
+end
+
 local function isBubbleBountyTask(scriptStateCR)
     local scriptStateOV = getBountyTaskType(scriptStateCR)
-    return scriptStateOV == "bubble" or scriptStateOV == "bubbles" or string.find(scriptStateOV, "bubble", 1, true) ~= nil
+    local taskSearchText = activeStates.BGSI_Lite_GetBountyTaskSearchText(scriptStateCR)
+    return scriptStateOV == "bubble"
+        or scriptStateOV == "bubbles"
+        or string.find(scriptStateOV, "bubble", 1, true) ~= nil
+        or string.find(taskSearchText, "bubble", 1, true) ~= nil
 end
 local function isHatchBountyTask(scriptStateRF)
     local scriptStateXZ = getBountyTaskType(scriptStateRF)
             if scriptStateXZ == "hatchegggroup" then
         return false
     end
-    return scriptStateXZ == "hatch" or string.find(scriptStateXZ, "hatch", 1, true) ~= nil
+    local taskSearchText = activeStates.BGSI_Lite_GetBountyTaskSearchText(scriptStateRF)
+    return scriptStateXZ == "hatch"
+        or string.find(scriptStateXZ, "hatch", 1, true) ~= nil
+        or string.find(taskSearchText, "hatch", 1, true) ~= nil
+        or (string.find(taskSearchText, "open", 1, true) ~= nil and string.find(taskSearchText, "egg", 1, true) ~= nil)
+end
+activeStates.BGSI_Lite_IsSpecificEggName = function(eggName)
+    if type(eggName) ~= "string" then
+        return false
+    end
+    local trimmedEggName = eggName:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmedEggName == "" or trimmedEggName == "Egg" or trimmedEggName == "Eggs" then
+        return false
+    end
+    if string.sub(trimmedEggName, 1, 1) == "(" then
+        return false
+    end
+    return true
 end
 local function getBountyEggName(scriptStateBO)
     local scriptStateLL = normalizeBountyTask(scriptStateBO) or scriptStateBO
             if type(scriptStateLL) == "table" then
         local scriptStateDG = scriptStateLL.Egg or scriptStateLL.egg or scriptStateLL.EggName
-            if type(scriptStateDG) == "string" and scriptStateDG ~= "" then
+            if activeStates.BGSI_Lite_IsSpecificEggName(scriptStateDG) then
             return scriptStateDG
         end
         if type(scriptStateLL.Item) == "table" then
             local scriptStateB = scriptStateLL.Item.Name or scriptStateLL.Item.Egg
-            if type(scriptStateB) == "string" and scriptStateB ~= "" then
+            if activeStates.BGSI_Lite_IsSpecificEggName(scriptStateB) then
                 return scriptStateB
             end
         end
@@ -1090,7 +1155,7 @@ local function getBountyEggName(scriptStateBO)
             return"Infinity Egg"
         end
     end
-    return(type(Config.selectedEgg) == "string" and Config.selectedEgg ~= "") and Config.selectedEgg or "Common Egg"
+    return activeStates.BGSI_Lite_IsSpecificEggName(Config.selectedEgg) and Config.selectedEgg or "Common Egg"
 end
 local gemShopSlots = nil
             local function getGemShopSlots()
@@ -1365,6 +1430,17 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
         task.wait(0)
     end
 end
+activeStates.BGSI_Lite_SellBubble = function()
+    pcall(function()
+        remoteEvent:FireServer("SellBubble")
+        remoteEvent:FireServer("SellBubble", true)
+        remoteEvent:FireServer("SellBubble", false)
+    end)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end)
+end
 local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, scriptStateFF)
     teleportToCFrame(CFrame.new(78, 9, - 110))
     task.wait(0.4)
@@ -1391,24 +1467,19 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
             lastProgress = bountyProgress
             lastProgressAt = tick()
         elseif tick() - lastProgressAt >= 45 then
-            pcall(function()
-                remoteEvent:FireServer("SellBubble")
-            end)
+            activeStates.BGSI_Lite_SellBubble()
             break
-        elseif tick() - lastProgressAt >= 15 then
-            pcall(function()
-                remoteEvent:FireServer("SellBubble")
-            end)
+        elseif tick() - lastProgressAt >= 3 and tick() - lastSellTime >= 0.75 then
+            teleportToCFrame(CFrame.new(78, 9, - 110))
+            activeStates.BGSI_Lite_SellBubble()
             lastSellTime = tick()
         end
         if tick() - teleportStartTime >= 2 then
             teleportToCFrame(CFrame.new(78, 9, - 110))
             teleportStartTime = tick()
         end
-        if tick() - lastSellTime >= 4 then
-            pcall(function()
-                remoteEvent:FireServer("SellBubble")
-            end)
+        if tick() - lastSellTime >= 2 then
+            activeStates.BGSI_Lite_SellBubble()
             lastSellTime = tick()
         end
         pcall(function()
@@ -5302,7 +5373,7 @@ do
     task.spawn(function()
         while true do
             task.wait(Config.autoBubble and 0.03 or 0.85)
-            if Config.autoBubble then
+            if Config.autoBubble and not isPriorityAutomationActive() then
                 pcall(function()
                     remoteEvent:FireServer("BlowBubble")
                 end)
@@ -5312,10 +5383,8 @@ do
     task.spawn(function()
         while true do
             task.wait(Config.autoSell and 1 or 0.85)
-            if Config.autoSell then
-                pcall(function()
-                    remoteEvent:FireServer("SellBubble")
-                end)
+            if Config.autoSell and not isPriorityAutomationActive() then
+                activeStates.BGSI_Lite_SellBubble()
             end
         end
     end)
@@ -6298,6 +6367,9 @@ task.spawn(function()
             task.wait(0.5)
             continue
         end
+        activeStates.BGSI_Lite_ChallengePassActive = true
+        activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
+        pauseNormalAutomation()
         local challengeQuestList = activeStates.GetChallengePassQuestList()
         if not activeStates.HasUnfinishedChallengePassQuest(challengeQuestList) then
             if Config.autoClaimChallengePassRewards or Config.autoResetChallengePass then
@@ -6306,14 +6378,9 @@ task.spawn(function()
             if Config.autoResetChallengePass then
                 activeStates.TryResetChallengePass(true)
             end
-            activeStates.BGSI_Lite_ChallengePassActive = false
-            resumeNormalAutomation()
-            task.wait(2)
+            task.wait(Config.autoResetChallengePass and 1 or 2)
             continue
         end
-        activeStates.BGSI_Lite_ChallengePassActive = true
-        activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
-        pauseNormalAutomation()
         for _, challengeQuest in ipairs(challengeQuestList) do
             if Config.autoChallengePassQuests ~= true then
                 break
@@ -6344,7 +6411,7 @@ task.spawn(function()
                             pcall(runCollectCurrencyBountyTask, getChallengeQuest, taskIndex, taskRequirement, shouldContinueChallengePass, getBountyCurrencyName(challengeTask))
                         elseif isHatchBountyTask(challengeTask) then
                             pcall(runHatchBountyTask, getChallengeQuest, taskIndex, taskRequirement, shouldContinueChallengePass)
-                        elseif isBubbleBountyTask(challengeTask) or tostring(challengeQuestId or ""):match("^bubble%-challenge%-%d+$") then
+                        elseif isBubbleBountyTask(challengeTask) then
                             pcall(runBubbleBountyTask, getChallengeQuest, taskIndex, taskRequirement, shouldContinueChallengePass)
                         else
                             task.wait(0.1)
@@ -7949,7 +8016,7 @@ local function runRebirthMachine(scriptStateMD, scriptStateYK, scriptStateNU)
         remoteFunction:InvokeServer(scriptStateNU, scriptStateADV)
     end)
 end
-local function canUseRebirthMachine()
+activeStates.BGSI_Lite_CanUseRebirthMachine = function()
     local scriptStateMF, scriptStatePQ = pcall(function()
         return profileStore:Get()
     end)
@@ -7965,7 +8032,7 @@ local function canUseRebirthMachine()
     end
     return getCurrentTimestamp() >= scriptStateDQ
 end
-local function canUseAdminRebirthMachine()
+activeStates.BGSI_Lite_CanUseAdminRebirthMachine = function()
     local scriptStateAAL, scriptStateJD = pcall(function()
         return profileStore:Get()
     end)
@@ -7981,7 +8048,7 @@ local function canUseAdminRebirthMachine()
     end
     return getCurrentTimestamp() >= scriptStateGK
 end
-local function isAdminRebirthMachineVisible()
+activeStates.BGSI_Lite_IsAdminRebirthMachineVisible = function()
     local scriptStateAEE, scriptStateOM = pcall(function()
         return workspace:FindFirstChild("AdminRebirthMachine", true) ~= nil
     end)
@@ -8275,7 +8342,7 @@ activeStates.InstallGuessThatPetEvents = function()
 end
 task.spawn(function()
     while true do
-        if Config.RebirthMachineEnabled and canUseRebirthMachine() then
+        if Config.RebirthMachineEnabled and activeStates.BGSI_Lite_CanUseRebirthMachine() then
             runRebirthMachine(5, Config.RebirthPetName, "UseRebirthMachine")
         end
         task.wait(0.5)
@@ -8339,7 +8406,7 @@ task.spawn(function()
 end)
 task.spawn(function()
     while true do
-        if Config.AdminRebirthMachineEnabled and isAdminRebirthMachineVisible() and canUseAdminRebirthMachine() then
+        if Config.AdminRebirthMachineEnabled and activeStates.BGSI_Lite_IsAdminRebirthMachineVisible() and activeStates.BGSI_Lite_CanUseAdminRebirthMachine() then
             runRebirthMachine(4, Config.AdminRebirthPetName, "UseAdminRebirthMachine")
         end
         task.wait(0.5)
