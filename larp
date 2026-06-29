@@ -164,22 +164,6 @@ local configFile = "1rzHubLiteConfig.json"
     AdminRebirthMachineEnabled = false,
     AutoCarnivalRebirth = false,
 
-    -- Minigames / fishing copied over from main hub.
-    autoMinigames = false,
-    autoRobotClaw = false,
-    autoCircusPetMatch = false,
-    autoPetMatch = false,
-    autoDanceOff = false,
-    autoHyperDarts = false,
-    autoIslandRace = false,
-    autoIslandRaceFragmentsOnly = false,
-    autoFishing = false,
-    fastMinigameTransitions = true,
-    hideRobotClawHUD = false,
-    noRobotClawCamera = false,
-    robotClawDebug = false,
-    minigameDifficulty = "Easy",
-
     disableRendering = false,
     renderDistance = 250,
     chunkerRenderDistance = 4,
@@ -377,6 +361,9 @@ pcall(function()
     bountyUtil = require(ReplicatedStorage.Shared.Utils.Stats.BountyUtil)
 end)
 pcall(function()
+    activeStates.BGSI_Lite_SecretBountyUtil = require(ReplicatedStorage.Shared.Utils.Stats.SecretBountyUtil)
+end)
+pcall(function()
     potionData = require(ReplicatedStorage.Shared.Data.Potions)
 end)
 pcall(function()
@@ -538,7 +525,8 @@ local function patchEggChunkerModule()
             end
         end
     end
-    if getgc then
+    if getgc and tick() - (eggChunkerTracker.LastGcScan or 0) >= 5 then
+        eggChunkerTracker.LastGcScan = tick()
         pcall(function()
             for loopSlotDX, scriptStateWJ in ipairs(getgc(true)) do
                 if isEggChunkerObject(scriptStateWJ) then
@@ -1427,7 +1415,7 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-        task.wait(0)
+        task.wait(0.05)
     end
 end
 activeStates.BGSI_Lite_SellBubble = function()
@@ -1615,15 +1603,16 @@ local function equipReturnPetTeam(scriptStateReturnTeam, scriptStatePreviousTeam
 end
 
 local function collectEveryActivePickup()
+    if type(getgc) ~= "function" or tick() - (activeStates.BGSI_Lite_LastPickupGcScanAt or 0) < 0.75 then
+        return
+    end
+    activeStates.BGSI_Lite_LastPickupGcScanAt = tick()
+
     if not ticketCollectPickupRemote then
         local scriptStateRemote = ReplicatedStorage:FindFirstChild("CollectPickup", true)
         if scriptStateRemote and scriptStateRemote:IsA("RemoteEvent") then
             ticketCollectPickupRemote = scriptStateRemote
         end
-    end
-
-    if type(getgc) ~= "function" then
-        return
     end
 
     pcall(function()
@@ -2305,7 +2294,6 @@ activeStates.BGSI_Lite_GlobalIncentiveActive = false
 activeStates.BGSI_Lite_ChallengePassActive = false
 activeStates.BGSI_Lite_RiftEggActive = false
 activeStates.BGSI_Lite_TicketPickupActive = false
-activeStates.BGSI_Lite_AllowMinigameStarts = false
 activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 activeStates.BGSI_Lite_NormalAutomationPaused = false
 local function isPriorityAutomationActive()
@@ -2522,10 +2510,6 @@ local gameTab = scriptStateOG:AddTab({
     Title = "Game",
     Icon = "gamepad"
 })
-local minigamesTab = scriptStateOG:AddTab({
-    Title = "Minigames",
-    Icon = "gamepad-2"
-})
 local scriptStateTJ = scriptStateOG:AddTab({
     Title = "Enchant",
     Icon = "wand-sparkles"
@@ -2580,701 +2564,6 @@ scriptStateDB:AddParagraph({
 })
 
 
---// Minigames port from 1rzMain
--- Keeps this Lite build small, but brings over the useful minigame automation toggles.
-do
-    local currentReelMinigame = nil
-    local minigameDataCache = nil
-    local itemUtilCache = nil
-
-    pcall(function()
-        local reelMinigameModule = require(ReplicatedStorage.Client.Gui.Frames.Fishing.FishingPlayerRods.RodComponent.States.Local.Reeling.ReelMinigame)
-        if type(reelMinigameModule) == "table" and type(reelMinigameModule.new) == "function" and not reelMinigameModule._LiteHooked then
-            reelMinigameModule._LiteHooked = true
-            local originalReelConstructor = reelMinigameModule.new
-            reelMinigameModule.new = function(...)
-                local reelObject = originalReelConstructor(...)
-                currentReelMinigame = reelObject
-                return reelObject
-            end
-        end
-    end)
-
-    local function getMinigameData()
-        if minigameDataCache then
-            return minigameDataCache
-        end
-        pcall(function()
-            minigameDataCache = require(ReplicatedStorage.Shared.Data.Minigames)
-        end)
-        return type(minigameDataCache) == "table" and minigameDataCache or {}
-    end
-
-    local function getItemUtil()
-        if itemUtilCache then
-            return itemUtilCache
-        end
-        pcall(function()
-            itemUtilCache = require(ReplicatedStorage.Shared.Utils.Stats.ItemUtil)
-        end)
-        return type(itemUtilCache) == "table" and itemUtilCache or nil
-    end
-
-    local function getLocalData()
-        local data
-        pcall(function()
-            if profileStore and profileStore.IsReady and profileStore:IsReady() then
-                data = profileStore:Get()
-            end
-        end)
-        return type(data) == "table" and data or nil
-    end
-
-    local function getDifficultyLevel()
-        local selectedDifficulty = tostring(Config.minigameDifficulty or "Easy")
-        if selectedDifficulty == "Medium" then
-            return 2
-        elseif selectedDifficulty == "Hard" then
-            return 3
-        elseif selectedDifficulty == "Insane" then
-            return 4
-        end
-        return 1
-    end
-
-    local function canStartMinigame(minigameName)
-        local playerData = getLocalData()
-        local minigameData = getMinigameData()[minigameName]
-        if not playerData or not minigameData then
-            return true
-        end
-
-        local playerLevel = 1
-        if type(playerData.MinigameLevels) == "table" then
-            playerLevel = tonumber(playerData.MinigameLevels[minigameName]) or 1
-        end
-        if playerLevel < getDifficultyLevel() then
-            return false
-        end
-
-        local itemUtilModule = getItemUtil()
-        if itemUtilModule and minigameData.Cost then
-            local ok, hasCost = pcall(function()
-                return itemUtilModule:GetOwnedAmount(playerData, minigameData.Cost) >= itemUtilModule:GetAmount(minigameData.Cost)
-            end)
-            if ok and not hasCost then
-                return false
-            end
-        end
-
-        return true
-    end
-
-    local function fireMinigameRemote(...)
-        local remoteArgs = { ... }
-        pcall(function()
-            remoteEvent:FireServer(table.unpack(remoteArgs))
-        end)
-    end
-
-    local function isMinigameAutomationEnabled(minigameName)
-        if minigameName == "Robot Claw" then
-            return Config.autoRobotClaw == true
-        elseif minigameName == "Pet Match" then
-            return Config.autoPetMatch == true or Config.autoCircusPetMatch == true
-        elseif minigameName == "Dance Off" then
-            return Config.autoDanceOff == true
-        elseif minigameName == "Hyper Darts" then
-            return Config.autoHyperDarts == true
-        elseif minigameName == "Island Race" then
-            return Config.autoIslandRace == true
-        end
-        return false
-    end
-
-    local function updateMinigameStartGuard()
-        activeStates.BGSI_Lite_AllowMinigameStarts =
-            Config.autoRobotClaw == true
-            or Config.autoPetMatch == true
-            or Config.autoCircusPetMatch == true
-            or Config.autoDanceOff == true
-            or Config.autoHyperDarts == true
-            or Config.autoIslandRace == true
-    end
-
-    local function installMinigameRemoteGuard()
-        if activeStates.BGSI_Lite_MinigameRemoteGuardInstalled then
-            return
-        end
-        local hookMeta = hookmetamethod
-        if type(hookMeta) ~= "function" or type(getnamecallmethod) ~= "function" then
-            return
-        end
-        activeStates.BGSI_Lite_MinigameRemoteGuardInstalled = true
-        local originalNamecall
-        originalNamecall = hookMeta(game, "__namecall", function(self, ...)
-            local methodName = getnamecallmethod()
-            local args = { ... }
-            if self == remoteEvent
-                and methodName == "FireServer"
-                and (args[1] == "StartMinigame" or args[1] == "SkipMinigameCooldown")
-                and activeStates.BGSI_Lite_AllowMinigameStarts ~= true then
-                return nil
-            end
-            return originalNamecall(self, ...)
-        end)
-    end
-
-    updateMinigameStartGuard()
-    pcall(installMinigameRemoteGuard)
-
-    local function startMinigame(minigameName)
-        updateMinigameStartGuard()
-        if not isCurrentRun() or not isMinigameAutomationEnabled(minigameName) then
-            return false
-        end
-        if not canStartMinigame(minigameName) then
-            return false
-        end
-        fireMinigameRemote("SkipMinigameCooldown", minigameName)
-        fireMinigameRemote("StartMinigame", minigameName, Config.minigameDifficulty or "Easy")
-        return true
-    end
-
-    local function finishMinigame()
-        fireMinigameRemote("FinishMinigame")
-    end
-
-    local function getMinigameHud(minigameName)
-        local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-        local screenGui = playerGui and playerGui:FindFirstChild("ScreenGui")
-        local minigameHud = screenGui and screenGui:FindFirstChild("MinigameHUD")
-        local minigameFrame = minigameHud and minigameHud:FindFirstChild(minigameName)
-        if minigameFrame and minigameHud and minigameHud.Visible and minigameFrame.Visible then
-            return minigameFrame, minigameHud
-        end
-        return nil, minigameHud
-    end
-
-    local function findDescendantByText(rootObject, wantedText)
-        if not rootObject then
-            return nil
-        end
-        wantedText = tostring(wantedText or ""):lower()
-        for _, descendant in ipairs(rootObject:GetDescendants()) do
-            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-                if tostring(descendant.Text or ""):lower():find(wantedText, 1, true) then
-                    return descendant
-                end
-            end
-        end
-        return nil
-    end
-
-    local function pressKey(keyCode)
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
-            task.wait(0.015)
-            VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
-        end)
-    end
-
-    local function clickGuiObject(guiObject)
-        if not guiObject or not guiObject:IsA("GuiObject") then
-            return
-        end
-        local position = guiObject.AbsolutePosition + (guiObject.AbsoluteSize / 2)
-        pcall(function()
-            VirtualInputManager:SendMouseButtonEvent(position.X, position.Y, 0, true, game, 1)
-            task.wait(0.015)
-            VirtualInputManager:SendMouseButtonEvent(position.X, position.Y, 0, false, game, 1)
-        end)
-    end
-
-    local function installFastTransitionHook(reason)
-        if not Config.fastMinigameTransitions or _G._Lite_PlayTransitionHooked then
-            return
-        end
-        local playTransitionModule = ReplicatedStorage.Client
-            and ReplicatedStorage.Client.Gui
-            and ReplicatedStorage.Client.Gui:FindFirstChild("PlayTransition")
-        if not playTransitionModule or not playTransitionModule:IsA("ModuleScript") then
-            return
-        end
-        local ok, playTransition = pcall(require, playTransitionModule)
-        if not ok or type(playTransition) ~= "function" then
-            return
-        end
-        local hookApi = hookfunction or rawget((getgenv and getgenv()) or _G, "hookfunc") or replaceclosure
-        if type(hookApi) ~= "function" then
-            return
-        end
-        local originalTransition
-        local hookOk = pcall(function()
-            originalTransition = hookApi(playTransition, function(titleText, callback, ...)
-                local loweredTitle = tostring(titleText or ""):lower()
-                if Config.autoRobotClaw and (loweredTitle:find("loading minigame", 1, true) or loweredTitle:find("returning home", 1, true)) then
-                    if type(callback) == "function" then
-                        task.spawn(function()
-                            pcall(callback)
-                        end)
-                    end
-                    return nil
-                end
-                return originalTransition(titleText, callback, ...)
-            end)
-        end)
-        if hookOk then
-            _G._Lite_PlayTransitionHooked = true
-        end
-    end
-
-    local function setRobotClawHudVisible(isVisible)
-        local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-        if not playerGui then
-            return
-        end
-        pcall(function()
-            for _, screenGui in ipairs(playerGui:GetChildren()) do
-                if screenGui:IsA("ScreenGui") then
-                    local robotClawFrame = screenGui:FindFirstChild("Robot Claw", true)
-                    if robotClawFrame and robotClawFrame:IsA("GuiObject") then
-                        robotClawFrame.Visible = isVisible
-                    end
-                    local minigameHud = screenGui:FindFirstChild("MinigameHUD", true)
-                    if minigameHud and minigameHud:IsA("GuiObject") and minigameHud:FindFirstChild("Robot Claw", true) then
-                        minigameHud.Visible = isVisible
-                    end
-                    for _, descendant in ipairs(screenGui:GetDescendants()) do
-                        if descendant:IsA("BillboardGui") and tostring(descendant.Name):sub(1, 8) == "ClawItem" then
-                            descendant.Enabled = isVisible
-                        end
-                    end
-                end
-            end
-        end)
-    end
-
-    local function lockCameraToPlayer()
-        if not Config.noRobotClawCamera then
-            return
-        end
-        local camera = workspace.CurrentCamera
-        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if camera and humanoid then
-            pcall(function()
-                camera.CameraType = Enum.CameraType.Custom
-                camera.CameraSubject = humanoid
-            end)
-        end
-    end
-
-    local function getClawMachine()
-        local cachedClawMachine = rawget(_G, "_Lite_ActiveClawMachine")
-        if cachedClawMachine and cachedClawMachine.Parent then
-            return cachedClawMachine
-        end
-        local clawMachine = Workspace:FindFirstChild("ClawMachine", true)
-        _G._Lite_ActiveClawMachine = clawMachine
-        return clawMachine
-    end
-
-    local function runRobotClawStep()
-        installFastTransitionHook("Robot Claw")
-        if Config.hideRobotClawHUD then
-            setRobotClawHudVisible(false)
-        end
-        lockCameraToPlayer()
-
-        local clawMachine = getClawMachine()
-        if not clawMachine then
-            startMinigame("Robot Claw")
-            return
-        end
-
-        local grabbedAnyItem = false
-        local seenItemGuids = {}
-        for _, clawToy in ipairs(CollectionService:GetTagged("ClawToyModel")) do
-            if clawToy:IsDescendantOf(clawMachine) and clawToy.Parent then
-                local itemGuid = clawToy:GetAttribute("ItemGUID")
-                local wasCollected = clawToy:GetAttribute("wasCollected")
-                if itemGuid and not wasCollected and not seenItemGuids[itemGuid] then
-                    seenItemGuids[itemGuid] = true
-                    grabbedAnyItem = true
-                    fireMinigameRemote("GrabMinigameItem", itemGuid)
-                    task.wait(0.01)
-                end
-            end
-        end
-
-        if grabbedAnyItem then
-            finishMinigame()
-            _G._Lite_ActiveClawMachine = nil
-            task.wait(0.05)
-        end
-    end
-
-    local function runPetMatchStep()
-        local frame = getMinigameHud("Pet Match")
-        if frame then
-            finishMinigame()
-            task.wait(0.08)
-        end
-        startMinigame("Pet Match")
-    end
-
-    local function runDanceOffStep()
-        local frame = getMinigameHud("Dance Off")
-        if not frame then
-            startMinigame("Dance Off")
-            return
-        end
-
-        local directionsFrame = frame:FindFirstChild("Directions", true)
-        if not directionsFrame then
-            return
-        end
-
-        local keyMap = {
-            w = Enum.KeyCode.W,
-            a = Enum.KeyCode.A,
-            s = Enum.KeyCode.S,
-            d = Enum.KeyCode.D,
-            up = Enum.KeyCode.W,
-            left = Enum.KeyCode.A,
-            down = Enum.KeyCode.S,
-            right = Enum.KeyCode.D,
-        }
-
-        for keyName, keyCode in pairs(keyMap) do
-            local directionButton = directionsFrame:FindFirstChild(keyName, true)
-            if directionButton and directionButton:IsA("GuiObject") and directionButton.Visible then
-                local button = directionButton:FindFirstChild("Button")
-                if not button or button.Active == true then
-                    pressKey(keyCode)
-                    task.wait(0.025)
-                end
-            end
-        end
-    end
-
-    local function runHyperDartsStep()
-        local frame = getMinigameHud("Hyper Darts")
-        if not frame then
-            startMinigame("Hyper Darts")
-            return
-        end
-
-        local clickedTarget = false
-        for _, descendant in ipairs(frame:GetDescendants()) do
-            local lowerName = tostring(descendant.Name):lower()
-            if descendant:IsA("GuiButton") and descendant.Visible and (lowerName:find("target") or lowerName:find("dart") or lowerName:find("balloon")) then
-                clickGuiObject(descendant)
-                clickedTarget = true
-                task.wait(0.01)
-            end
-        end
-
-        if not clickedTarget then
-            for _, descendant in ipairs(frame:GetDescendants()) do
-                if descendant:IsA("GuiButton") and descendant.Visible and descendant.Active then
-                    clickGuiObject(descendant)
-                    task.wait(0.01)
-                end
-            end
-        end
-    end
-
-    local islandRacePoints = {
-        CFrame.new(-77, 18, -107),
-        CFrame.new(-129, 31, -93),
-        CFrame.new(-166, 47, -102),
-        CFrame.new(-204, 61, -65),
-        CFrame.new(-241, 78, -26),
-        CFrame.new(-281, 95, 9),
-    }
-
-    local function getIslandRacePoints()
-        local points = {}
-        local renderedFolder = Workspace:FindFirstChild("Rendered")
-        if renderedFolder then
-            for _, descendant in ipairs(renderedFolder:GetDescendants()) do
-                local lowerName = tostring(descendant.Name):lower()
-                if (lowerName:find("checkpoint") or lowerName:find("island")) and (descendant:IsA("BasePart") or descendant:IsA("Model")) then
-                    local ok, pointCFrame = pcall(function()
-                        return descendant:IsA("Model") and descendant:GetPivot() or descendant.CFrame
-                    end)
-                    if ok and typeof(pointCFrame) == "CFrame" then
-                        table.insert(points, pointCFrame + Vector3.new(0, 4, 0))
-                    end
-                end
-            end
-        end
-        table.sort(points, function(a, b)
-            return a.Position.Y < b.Position.Y
-        end)
-        return #points > 0 and points or islandRacePoints
-    end
-
-    local function runIslandRaceStep()
-        local frame = getMinigameHud("Island Race")
-        if not frame then
-            startMinigame("Island Race")
-            task.wait(0.2)
-        end
-
-        _G.BGSI_IslandRaceReserved = true
-        local character = LocalPlayer.Character
-        local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-        if not rootPart then
-            return
-        end
-
-        for _, pointCFrame in ipairs(getIslandRacePoints()) do
-            if not Config.autoIslandRace then
-                break
-            end
-            pcall(function()
-                rootPart.AssemblyLinearVelocity = Vector3.zero
-                rootPart.CFrame = pointCFrame
-            end)
-            task.wait(0.5)
-        end
-        finishMinigame()
-        _G.BGSI_IslandRaceReserved = false
-    end
-
-    local function runFishingStep()
-        pcall(function()
-            remoteEvent:FireServer("EquipRod")
-        end)
-
-        local reelObject = currentReelMinigame
-        if reelObject and not reelObject._isFinished then
-            pcall(function()
-                reelObject.Progress = 1
-                reelObject._progress = 1
-                reelObject._isFinished = true
-            end)
-            return
-        end
-
-        local character = LocalPlayer.Character
-        if not character then
-            return
-        end
-
-        local hasRodEquipped = false
-        for _, child in ipairs(character:GetChildren()) do
-            if child:IsA("Tool") and tostring(child.Name):lower():find("rod", 1, true) then
-                hasRodEquipped = true
-                break
-            end
-        end
-
-        if hasRodEquipped then
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, true)
-                task.wait(0.1)
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, true)
-            end)
-        end
-    end
-
-    minigamesTab:AddSection("Main")
-    minigamesTab:AddDropdown("MinigameDifficulty", {
-        Title = "Difficulty",
-        Values = { "Easy", "Medium", "Hard", "Insane" },
-        Default = Config.minigameDifficulty or "Easy",
-        Multi = false,
-        Callback = function(selectedDifficulty)
-            Config.minigameDifficulty = selectedDifficulty
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoRobotClaw", {
-        Title = "Auto Robot Claw",
-        Default = Config.autoRobotClaw,
-        Callback = function(isEnabled)
-            Config.autoRobotClaw = isEnabled
-            Config.autoMinigames = false
-            updateMinigameStartGuard()
-            if not isEnabled then
-                _G._Lite_ActiveClawMachine = nil
-                _G.BGSI_IslandRaceReserved = false
-                setRobotClawHudVisible(true)
-            end
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoPetMatch", {
-        Title = "Auto Pet Match",
-        Default = Config.autoPetMatch or Config.autoCircusPetMatch,
-        Callback = function(isEnabled)
-            Config.autoPetMatch = isEnabled
-            Config.autoCircusPetMatch = isEnabled
-            updateMinigameStartGuard()
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoDanceOff", {
-        Title = "Auto Dance Off",
-        Default = Config.autoDanceOff,
-        Callback = function(isEnabled)
-            Config.autoDanceOff = isEnabled
-            updateMinigameStartGuard()
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoHyperDarts", {
-        Title = "Auto Hyper Darts",
-        Default = Config.autoHyperDarts,
-        Callback = function(isEnabled)
-            Config.autoHyperDarts = isEnabled
-            updateMinigameStartGuard()
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoIslandRace", {
-        Title = "Auto Island Race",
-        Default = Config.autoIslandRace,
-        Callback = function(isEnabled)
-            Config.autoIslandRace = isEnabled
-            updateMinigameStartGuard()
-            if not isEnabled then
-                _G.BGSI_IslandRaceReserved = false
-            end
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoIslandRaceFragmentsOnly", {
-        Title = "Island Race Fragments Only",
-        Default = Config.autoIslandRaceFragmentsOnly,
-        Callback = function(isEnabled)
-            Config.autoIslandRaceFragmentsOnly = isEnabled
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("AutoFishing", {
-        Title = "Auto Fishing",
-        Default = Config.autoFishing,
-        Callback = function(isEnabled)
-            Config.autoFishing = isEnabled
-            updateMinigameStartGuard()
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("FastMinigameTransitions", {
-        Title = "Fast Minigame Transitions",
-        Default = Config.fastMinigameTransitions,
-        Callback = function(isEnabled)
-            Config.fastMinigameTransitions = isEnabled
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("HideRobotClawHUD", {
-        Title = "Hide Robot Claw HUD",
-        Default = Config.hideRobotClawHUD,
-        Callback = function(isEnabled)
-            Config.hideRobotClawHUD = isEnabled
-            if not isEnabled then
-                setRobotClawHudVisible(true)
-            end
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("NoRobotClawCamera", {
-        Title = "Keep Camera Normal",
-        Default = Config.noRobotClawCamera,
-        Callback = function(isEnabled)
-            Config.noRobotClawCamera = isEnabled
-            saveConfig()
-        end,
-    })
-
-    minigamesTab:AddToggle("RobotClawDebug", {
-        Title = "Robot Claw Debug",
-        Default = Config.robotClawDebug,
-        Callback = function(isEnabled)
-            Config.robotClawDebug = isEnabled
-            saveConfig()
-        end,
-    })
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(Config.autoRobotClaw and 0.05 or 0.5)
-            if isCurrentRun() and Config.autoRobotClaw then
-                local ok, err = pcall(runRobotClawStep)
-                if not ok and Config.robotClawDebug then
-                    warn("[1rzLite][RobotClaw]", err)
-                end
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait((Config.autoPetMatch or Config.autoCircusPetMatch) and 0.12 or 0.75)
-            if isCurrentRun() and (Config.autoPetMatch or Config.autoCircusPetMatch) then
-                pcall(runPetMatchStep)
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(Config.autoDanceOff and 0.05 or 0.75)
-            if isCurrentRun() and Config.autoDanceOff then
-                pcall(runDanceOffStep)
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(Config.autoHyperDarts and 0.05 or 0.75)
-            if isCurrentRun() and Config.autoHyperDarts then
-                pcall(runHyperDartsStep)
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(Config.autoIslandRace and 0.25 or 1)
-            if isCurrentRun() and Config.autoIslandRace then
-                pcall(runIslandRaceStep)
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(Config.autoFishing and 0.1 or 1)
-            if isCurrentRun() and Config.autoFishing then
-                pcall(runFishingStep)
-            end
-        end
-    end)
-
-    task.spawn(function()
-        while isCurrentRun() do
-            task.wait(1) -- Refresh every 1 second
-            refreshChunkerAroundPlayer()
-        end
-    end)
-end
 scriptStateOG:SelectTab(1)
 Fluent:Notify({
     Title = "1rzHub Lite",
@@ -3931,11 +3220,18 @@ do
         end,
     })
     eggTab:AddToggle("SpawnRift", {
-        Title = "Spawn Rift for Bounty (every hour)",
+        Title = "Spawn 25x Bounty Rift (1 hour)",
         Default = Config.spawnRift,
         Callback = function(scriptStateIZ)
             Config.spawnRift = scriptStateIZ;saveConfig()
+            if scriptStateIZ and type(activeStates.BGSI_Lite_SummonBountyRift) == "function" then
+                task.spawn(activeStates.BGSI_Lite_SummonBountyRift, false)
+            end
         end,
+    })
+    activeStates.BGSI_Lite_BountyInfoParagraph = eggTab:AddParagraph({
+        Title = "Current Bounty",
+        Content = "Loading...",
     })
     eggTab:AddSection("Admin Abuse")
     eggTab:AddToggle("AutoLuckEgg", {
@@ -3950,12 +3246,11 @@ activeStates.BGSI_Lite_LuckEggActive = false
 task.spawn(function()
     local luckEggCooldown = 0
     while true do
-        task.wait(0)
+        task.wait(Config.autoLuckEgg and 0.05 or 0.85)
         if Config.autoLuckEgg ~= true then
             if activeStates.BGSI_Lite_LuckEggActive then
                 activeStates.BGSI_Lite_LuckEggActive = false
             end
-            task.wait(tonumber(rawget((getgenv and getgenv()) or _G, "BGSI_FEATURE_IDLE_WAIT")) or 0.85)
             continue
         end
         local summonedEgg = workspace:FindFirstChild("SummonedEgg")
@@ -3992,13 +3287,13 @@ end)
 task.spawn(function()
     local scriptStateAFX = 0
     while true do
-        task.wait(0)
+        task.wait(Config.autoHatch and 0.05 or 0.85)
         if Config.autoHatch ~= true then
             scriptStateAFX = 0;
             continue
         end
         clearDisabledPriorityStates()
-        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive then
+        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
             continue
         end
         local scriptStateRX = LocalPlayer and LocalPlayer.Character
@@ -4022,7 +3317,7 @@ task.spawn(function()
 end)
 task.spawn(function()
     while true do
-        task.wait(0)
+        task.wait(Config.autoSpamE and 0.05 or 0.85)
         if Config.autoSpamE ~= true then
             continue
         end
@@ -4039,13 +3334,22 @@ local function getLuckEggPosition(scriptStateMK)
     if type(scriptStateMK.Egg) == "string" then
         return scriptStateMK.Egg
     end
+    if type(scriptStateMK.EggName) == "string" then
+        return scriptStateMK.EggName
+    end
     local scriptStateT = scriptStateMK.Task
             if type(scriptStateT) == "table" then
         if type(scriptStateT.Egg) == "string" then
             return scriptStateT.Egg
         end
+        if type(scriptStateT.EggName) == "string" then
+            return scriptStateT.EggName
+        end
         if type(scriptStateT[1]) == "table" and type(scriptStateT[1].Egg) == "string" then
             return scriptStateT[1].Egg
+        end
+        if isHatchBountyTask(scriptStateT) then
+            return getBountyEggName(scriptStateT)
         end
     end
     if type(scriptStateMK.Tasks) == "table" then
@@ -4054,8 +3358,17 @@ local function getLuckEggPosition(scriptStateMK)
                 if type(scriptStateBV.Egg) == "string" then
                     return scriptStateBV.Egg
                 end
+                if type(scriptStateBV.EggName) == "string" then
+                    return scriptStateBV.EggName
+                end
                 if type(scriptStateBV.Item) == "table" and type(scriptStateBV.Item.Egg) == "string" then
                     return scriptStateBV.Item.Egg
+                end
+                if type(scriptStateBV.Item) == "table" and type(scriptStateBV.Item.Name) == "string" and isHatchBountyTask(scriptStateBV) then
+                    return scriptStateBV.Item.Name
+                end
+                if isHatchBountyTask(scriptStateBV) then
+                    return getBountyEggName(scriptStateBV)
                 end
             end
         end
@@ -4067,10 +3380,359 @@ local function getLuckEggPosition(scriptStateMK)
             end
         end
     end
+    if isHatchBountyTask(scriptStateMK) then
+        return getBountyEggName(scriptStateMK)
+    end
     return nil
 end
+activeStates.BGSI_Lite_GetPetChanceLookup = function()
+    if type(activeStates.BGSI_Lite_PetChanceLookup) == "table" then
+        return activeStates.BGSI_Lite_PetChanceLookup
+    end
+    local chanceLookup = {}
+    local function toNumber(value)
+        if type(value) == "number" and value == value then
+            return value
+        end
+        if type(value) == "string" then
+            return tonumber(value)
+        end
+        return nil
+    end
+    local function scanChanceTable(sourceTable, depth, seenTables)
+        if depth > 12 or type(sourceTable) ~= "table" or seenTables[sourceTable] then
+            return
+        end
+        seenTables[sourceTable] = true
+        local petName = sourceTable.Pet
+        local petChance = toNumber(sourceTable.Chance)
+        if type(petName) == "string" and petName ~= "" and petChance then
+            chanceLookup[petName] = petChance
+        end
+        if type(sourceTable.Pets) == "table" then
+            for _, petEntry in pairs(sourceTable.Pets) do
+                if type(petEntry) == "table" then
+                    local nestedPetName = petEntry.Pet or petEntry.Name
+                    local nestedPetChance = toNumber(petEntry.Chance)
+                    if type(nestedPetName) == "string" and nestedPetName ~= "" and nestedPetChance then
+                        chanceLookup[nestedPetName] = nestedPetChance
+                    end
+                end
+            end
+        end
+        if type(sourceTable.Name) == "string" and (type(petName) ~= "string" or petName == "") and petChance then
+            local entryType = sourceTable.Type
+            if entryType ~= "Powerup" and entryType ~= "Potion" and entryType ~= "Egg" and type(sourceTable.Cost) ~= "table" then
+                if not (type(sourceTable.Interval) == "number" and type(sourceTable.Pets) == "table") then
+                    chanceLookup[sourceTable.Name] = petChance
+                end
+            end
+        end
+        for _, childValue in pairs(sourceTable) do
+            if type(childValue) == "table" then
+                scanChanceTable(childValue, depth + 1, seenTables)
+            end
+        end
+    end
+    for _, constantsLoader in ipairs({
+        function()
+            return require(ReplicatedStorage.Shared.Framework.Constants)
+        end,
+        function()
+            return require(ReplicatedStorage.Shared.Constants)
+        end,
+        function()
+            return sharedConstants
+        end,
+    }) do
+        local ok, constantsTable = pcall(constantsLoader)
+        if ok and type(constantsTable) == "table" then
+            scanChanceTable(constantsTable, 0, {})
+        end
+    end
+    if type(petRarityData) == "table" then
+        for petName, petInfo in pairs(petRarityData) do
+            if type(petName) == "string" and type(petInfo) == "table" then
+                local petChance = toNumber(petInfo.Chance)
+                if petChance and chanceLookup[petName] == nil then
+                    chanceLookup[petName] = petChance
+                end
+            end
+        end
+    end
+    activeStates.BGSI_Lite_PetChanceLookup = chanceLookup
+    return chanceLookup
+end
+activeStates.BGSI_Lite_ExtractBountyInfo = function(bountyData)
+    if type(bountyData) ~= "table" then
+        return nil
+    end
+    local bountyInfo = {
+        Egg = getLuckEggPosition(bountyData),
+    }
+    local function isLikelyPetName(value)
+        if type(value) ~= "string" or value == "" then
+            return false
+        end
+        local loweredValue = string.lower(value)
+        return loweredValue ~= "egg"
+            and loweredValue ~= "eggs"
+            and not string.find(loweredValue, " egg", 1, true)
+            and not string.find(loweredValue, "quest", 1, true)
+            and not string.find(loweredValue, "bounty", 1, true)
+    end
+    local seenTables = {}
+    local function scanBountyValue(value, depth)
+        if depth > 8 or type(value) ~= "table" or seenTables[value] then
+            return
+        end
+        seenTables[value] = true
+        if type(value.Egg) == "string" and value.Egg ~= "" then
+            bountyInfo.Egg = value.Egg
+        elseif type(value.EggName) == "string" and value.EggName ~= "" then
+            bountyInfo.Egg = value.EggName
+        end
+        local possiblePetName = value.Pet or value.PetName or value.Name
+        if isLikelyPetName(possiblePetName) then
+            bountyInfo.Name = bountyInfo.Name or possiblePetName
+        end
+        if type(value.Item) == "table" then
+            local itemName = value.Item.Pet or value.Item.PetName or value.Item.Name
+            if isLikelyPetName(itemName) then
+                bountyInfo.Name = bountyInfo.Name or itemName
+            end
+        end
+        if bountyInfo.Chance == nil and type(value.Chance) == "number" then
+            bountyInfo.Chance = value.Chance
+            bountyInfo.ChanceSource = "rawBounty"
+        end
+        for _, childValue in pairs(value) do
+            if type(childValue) == "table" then
+                scanBountyValue(childValue, depth + 1)
+            end
+        end
+    end
+    scanBountyValue(bountyData, 0)
+    local chanceLookup = activeStates.BGSI_Lite_GetPetChanceLookup()
+    if type(bountyInfo.Name) == "string" and chanceLookup[bountyInfo.Name] then
+        bountyInfo.Chance = chanceLookup[bountyInfo.Name]
+        bountyInfo.ChanceSource = "lookup"
+    end
+    if type(bountyInfo.Egg) ~= "string" or bountyInfo.Egg == "" then
+        return nil
+    end
+    return bountyInfo
+end
+activeStates.BGSI_Lite_UpdateBountyInfoFromQuest = function()
+    if bountyUtil and type(bountyUtil.GetQuest) == "function" and type(bountyUtil.GetSeed) == "function" then
+        for _, seedOffset in ipairs({
+            0,
+            - 1,
+            1
+        }) do
+            local ok, bountyQuest = pcall(function()
+                return bountyUtil:GetQuest(bountyUtil:GetSeed() + seedOffset)
+            end)
+            local bountyInfo = ok and activeStates.BGSI_Lite_ExtractBountyInfo(bountyQuest) or nil
+            if type(bountyInfo) == "table" and type(bountyInfo.Egg) == "string" then
+                activeStates.BGSI_Lite_LastSecretBounty = bountyInfo
+                return bountyInfo.Egg
+            end
+        end
+    end
+    local ok, playerData = pcall(function()
+        return profileStore:IsReady() and profileStore:Get() or nil
+    end)
+    if ok and type(playerData) == "table" then
+        for _, questKey in ipairs({
+            "Bounty",
+            "BountyQuest",
+            "DailyBounty"
+        }) do
+            local bountyInfo = activeStates.BGSI_Lite_ExtractBountyInfo(playerData[questKey])
+            if type(bountyInfo) == "table" and type(bountyInfo.Egg) == "string" then
+                activeStates.BGSI_Lite_LastSecretBounty = bountyInfo
+                return bountyInfo.Egg
+            end
+        end
+    end
+    return nil
+end
+activeStates.BGSI_Lite_GetSecretBountyEgg = function(offset)
+    local secretBountyUtil = activeStates.BGSI_Lite_SecretBountyUtil
+    local getUpvalueFunction = getupvalue or debug and debug.getupvalue
+    if type(secretBountyUtil) == "table" and type(secretBountyUtil.Get) == "function" then
+        local directResults = table.pack(pcall(function()
+            return secretBountyUtil:Get()
+        end))
+        local directInfo = directResults[1] and activeStates.BGSI_Lite_ExtractBountyInfo(directResults[2]) or nil
+        if not directInfo and directResults[1] and type(directResults[2]) == "table" and type(directResults[3]) == "string" then
+            directInfo = activeStates.BGSI_Lite_ExtractBountyInfo({
+                Pet = directResults[2].Name or directResults[2].Pet,
+                Chance = directResults[2].Chance,
+                Egg = directResults[3],
+            })
+        end
+        if type(directInfo) == "table" and type(directInfo.Egg) == "string" then
+            activeStates.BGSI_Lite_LastSecretBounty = directInfo
+            return directInfo.Egg
+        end
+    end
+    if type(secretBountyUtil) ~= "table" or type(secretBountyUtil.Get) ~= "function" or type(getUpvalueFunction) ~= "function" then
+        return nil
+    end
+
+    local function readUpvalue(upvalueIndex)
+        local upvalueResult = table.pack(pcall(getUpvalueFunction, secretBountyUtil.Get, upvalueIndex))
+        if not upvalueResult[1] then
+            return nil
+        end
+        if type(upvalueResult[3]) == "table" then
+            return upvalueResult[3]
+        end
+        return upvalueResult[2]
+    end
+
+    local pets = readUpvalue(2)
+    local possibleEggs = readUpvalue(3)
+    if type(pets) ~= "table" or type(possibleEggs) ~= "table" or #pets == 0 or #possibleEggs == 0 then
+        return nil
+    end
+
+    local secondsInDay = tonumber(timeModule and timeModule.secondsInDay) or 86400
+    local currentTime = getCurrentTimestamp()
+    local seedOffset = math.floor((tonumber(offset) or 0))
+    local bountySeed = (math.floor(currentTime / secondsInDay) - 1) + seedOffset
+    local previousRandom = Random.new(bountySeed - 1)
+    local currentRandom = Random.new(bountySeed)
+
+    local previousPetIndex = previousRandom:NextInteger(1, #pets)
+    local currentPetIndex = currentRandom:NextInteger(1, #pets)
+    if currentPetIndex == previousPetIndex then
+        currentPetIndex = currentPetIndex % #pets + 1
+    end
+
+    local previousEggIndex = previousRandom:NextInteger(1, #possibleEggs)
+    local currentEggIndex = currentRandom:NextInteger(1, #possibleEggs)
+    if previousEggIndex == currentEggIndex then
+        currentEggIndex = currentEggIndex % #possibleEggs + 1
+    end
+
+    local bountyPet = pets[currentPetIndex]
+    local bountyEgg = possibleEggs[currentEggIndex]
+    if type(bountyEgg) ~= "string" or bountyEgg == "" then
+        return nil
+    end
+
+    activeStates.BGSI_Lite_LastSecretBounty = {
+        Name = type(bountyPet) == "table" and bountyPet.Name or nil,
+        Chance = type(bountyPet) == "table" and bountyPet.Chance or nil,
+        ChanceSource = "rawBounty",
+        Egg = bountyEgg,
+    }
+    local chanceLookup = activeStates.BGSI_Lite_GetPetChanceLookup()
+    if type(activeStates.BGSI_Lite_LastSecretBounty.Name) == "string" and chanceLookup[activeStates.BGSI_Lite_LastSecretBounty.Name] then
+        activeStates.BGSI_Lite_LastSecretBounty.Chance = chanceLookup[activeStates.BGSI_Lite_LastSecretBounty.Name]
+        activeStates.BGSI_Lite_LastSecretBounty.ChanceSource = "lookup"
+    end
+    return bountyEgg
+end
+activeStates.BGSI_Lite_FormatBountyChance = function(chanceValue, chanceSource)
+    chanceValue = tonumber(chanceValue)
+    if not chanceValue or chanceValue <= 0 then
+        return "?"
+    end
+    local function formatCompactChance(numberValue)
+        numberValue = tonumber(numberValue) or 0
+        for _, suffixInfo in ipairs({
+            { value = 1000000000000, suffix = "t" },
+            { value = 1000000000, suffix = "b" },
+            { value = 1000000, suffix = "m" },
+            { value = 1000, suffix = "k" },
+        }) do
+            if numberValue >= suffixInfo.value then
+                local compactValue = numberValue / suffixInfo.value
+                if math.abs(compactValue - math.floor(compactValue + 0.5)) < 0.05 then
+                    return tostring(math.floor(compactValue + 0.5))..suffixInfo.suffix
+                end
+                return string.format("%.1f", compactValue):gsub("%.0$", "")..suffixInfo.suffix
+            end
+        end
+        return tostring(math.floor(numberValue + 0.5))
+    end
+    local oneInChance
+    if chanceValue < 1 then
+        oneInChance = 1 / chanceValue
+    else
+        oneInChance = chanceValue
+    end
+    if chanceSource == "rawBounty" then
+        oneInChance = oneInChance * 250
+    end
+    if oneInChance >= 1 then
+        return "1/"..formatCompactChance(oneInChance)
+    end
+    return tostring(chanceValue)
+end
+activeStates.BGSI_Lite_FormatRotationTime = function()
+    local secondsInDay = tonumber(timeModule and timeModule.secondsInDay) or 86400
+    local currentTime = getCurrentTimestamp()
+    local secondsRemaining = math.max(0, math.floor(secondsInDay - (currentTime % secondsInDay)))
+    local hoursRemaining = math.floor(secondsRemaining / 3600)
+    local minutesRemaining = math.floor((secondsRemaining % 3600) / 60)
+    local secondsOnly = secondsRemaining % 60
+    if hoursRemaining > 0 then
+        return tostring(hoursRemaining).."h "..tostring(minutesRemaining).."m"
+    end
+    if minutesRemaining > 0 then
+        return tostring(minutesRemaining).."m "..tostring(secondsOnly).."s"
+    end
+    return tostring(secondsOnly).."s"
+end
+activeStates.BGSI_Lite_GetBountyInfoText = function()
+    if not activeStates.BGSI_Lite_GetSecretBountyEgg(0) then
+        activeStates.BGSI_Lite_UpdateBountyInfoFromQuest()
+    end
+    local bountyInfo = activeStates.BGSI_Lite_LastSecretBounty
+    if type(bountyInfo) ~= "table" or type(bountyInfo.Egg) ~= "string" then
+        return "Loading..."
+    end
+    local bountyPetName = type(bountyInfo.Name) == "string" and bountyInfo.Name or "Unknown Pet"
+    local bountyEggName = bountyInfo.Egg
+    local bountyChance = activeStates.BGSI_Lite_FormatBountyChance(bountyInfo.Chance, bountyInfo.ChanceSource)
+    return bountyPetName.." is in "..bountyEggName.." ("..bountyChance..")\nRotates in "..activeStates.BGSI_Lite_FormatRotationTime()
+end
+activeStates.BGSI_Lite_UpdateBountyInfoParagraph = function()
+    if not activeStates.BGSI_Lite_BountyInfoParagraph then
+        return
+    end
+    local bountyInfoText = activeStates.BGSI_Lite_GetBountyInfoText()
+    if type(activeStates.BGSI_Lite_BountyInfoParagraph.SetDesc) == "function" then
+        pcall(function()
+            activeStates.BGSI_Lite_BountyInfoParagraph:SetDesc(bountyInfoText)
+        end)
+    elseif activeStates.BGSI_Lite_BountyInfoParagraph.DescLabel then
+        pcall(function()
+            activeStates.BGSI_Lite_BountyInfoParagraph.DescLabel.Text = bountyInfoText
+        end)
+    end
+end
+task.spawn(function()
+    while true do
+        pcall(activeStates.BGSI_Lite_UpdateBountyInfoParagraph)
+        task.wait(1)
+    end
+end)
 local scriptStateAAR = false
             local function stopLuckEggAutomation()
+    local secretBountyEgg = activeStates.BGSI_Lite_GetSecretBountyEgg(0)
+    if type(secretBountyEgg) == "string" and secretBountyEgg ~= "" then
+        return secretBountyEgg
+    end
+    local questBountyEgg = activeStates.BGSI_Lite_UpdateBountyInfoFromQuest()
+    if type(questBountyEgg) == "string" and questBountyEgg ~= "" then
+        return questBountyEgg
+    end
     if bountyUtil and type(bountyUtil.GetQuest) == "function" and type(bountyUtil.GetSeed) == "function" then
         for loopSlotCK, scriptStateXM in ipairs({
             0,
@@ -4112,11 +3774,11 @@ end
 task.spawn(function()
     local scriptStatePN = 0
     while true do
-        task.wait(0)
+        task.wait(Config.autoBounty and 0.05 or 0.85)
         if Config.autoBounty ~= true then
             continue
         end
-        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive then
+        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
             continue
         end
         local scriptStateCI = stopLuckEggAutomation()
@@ -4137,26 +3799,162 @@ task.spawn(function()
         fireHatchEgg(scriptStateCI)
     end
 end)
+activeStates.BGSI_Lite_LastBountyRiftSpawnAt = activeStates.BGSI_Lite_LastBountyRiftSpawnAt or 0
+activeStates.BGSI_Lite_BountyRiftActive = false
+activeStates.BGSI_Lite_GetRiftsFolder = function()
+    local renderedFolder = Workspace:FindFirstChild("Rendered")
+    return renderedFolder and renderedFolder:FindFirstChild("Rifts") or nil
+end
+activeStates.BGSI_Lite_RiftMatchesEgg = function(riftObject, bountyEggName)
+    if not riftObject or type(bountyEggName) ~= "string" or bountyEggName == "" then
+        return false
+    end
+    local riftInfo = type(riftData) == "table" and riftData[riftObject.Name] or nil
+    if type(riftInfo) == "table" and riftInfo.Type == "Egg" and riftInfo.Egg == bountyEggName then
+        return true
+    end
+    for _, attributeName in ipairs({
+        "Egg",
+        "EggName",
+        "Name",
+    }) do
+        if riftObject:GetAttribute(attributeName) == bountyEggName then
+            return true
+        end
+    end
+    return false
+end
+activeStates.BGSI_Lite_FindNewSpawnedBountyRift = function(bountyEggName, riftsBefore)
+    local riftsFolder = activeStates.BGSI_Lite_GetRiftsFolder()
+    if not riftsFolder then
+        return nil
+    end
+    riftsBefore = type(riftsBefore) == "table" and riftsBefore or {}
+    for _, riftObject in ipairs(riftsFolder:GetChildren()) do
+        if not riftsBefore[riftObject] and activeStates.BGSI_Lite_RiftMatchesEgg(riftObject, bountyEggName) then
+            return riftObject
+        end
+    end
+    for _, riftObject in ipairs(riftsFolder:GetChildren()) do
+        if not riftsBefore[riftObject] then
+            return riftObject
+        end
+    end
+    return nil
+end
+activeStates.BGSI_Lite_RememberBountyRift = function(riftObject, bountyEggName)
+    if not riftObject then
+        return nil
+    end
+    activeStates.BGSI_Lite_SpawnedBountyRiftObject = riftObject
+    activeStates.BGSI_Lite_SpawnedBountyRiftEgg = bountyEggName
+    activeStates.BGSI_Lite_SpawnedBountyRiftName = riftObject.Name
+    return riftObject
+end
+activeStates.BGSI_Lite_GetBountyRiftObject = function(bountyEggName)
+    if type(bountyEggName) ~= "string" or bountyEggName == "" then
+        return nil
+    end
+    local riftsFolder = activeStates.BGSI_Lite_GetRiftsFolder()
+    if not riftsFolder then
+        return nil
+    end
+    local spawnedRiftObject = activeStates.BGSI_Lite_SpawnedBountyRiftObject
+    if spawnedRiftObject and spawnedRiftObject.Parent and spawnedRiftObject:IsDescendantOf(riftsFolder) and activeStates.BGSI_Lite_SpawnedBountyRiftEgg == bountyEggName then
+        return spawnedRiftObject
+    end
+    activeStates.BGSI_Lite_SpawnedBountyRiftObject = nil
+    activeStates.BGSI_Lite_SpawnedBountyRiftName = nil
+    return nil
+end
+activeStates.BGSI_Lite_GetObjectCFrame = function(riftObject)
+    if not riftObject then
+        return nil
+    end
+    local pivotSuccess, objectCFrame = pcall(function()
+        return riftObject:GetPivot()
+    end)
+    if pivotSuccess and typeof(objectCFrame) == "CFrame" then
+        return objectCFrame
+    end
+    local objectPart = riftObject:IsA("BasePart") and riftObject or riftObject:FindFirstChildWhichIsA("BasePart", true)
+    return objectPart and objectPart.CFrame or nil
+end
+activeStates.BGSI_Lite_SummonBountyRift = function(forceSpawn)
+    local bountyEggName = stopLuckEggAutomation()
+    if type(bountyEggName) ~= "string" or bountyEggName == "" then
+        return false
+    end
+    local existingSpawnedRift = activeStates.BGSI_Lite_GetBountyRiftObject(bountyEggName)
+    if existingSpawnedRift then
+        activeStates.BGSI_Lite_LastBountyRiftEgg = bountyEggName
+        return true
+    end
+    if forceSpawn ~= true and tick() - (tonumber(activeStates.BGSI_Lite_LastBountyRiftSpawnAt) or 0) < 8 then
+        return false
+    end
+    local riftsFolder = activeStates.BGSI_Lite_GetRiftsFolder()
+    local riftsBefore = {}
+    if riftsFolder then
+        for _, riftObject in ipairs(riftsFolder:GetChildren()) do
+            riftsBefore[riftObject] = true
+        end
+    end
+    local bountyWorld = (bountyEggName == "Mining Egg" or bountyEggName == "Neon Egg" or bountyEggName == "Cyber Egg") and "Minigame Paradise" or "The Overworld"
+    local summonSucceeded = false
+    pcall(function()
+        remoteFunction:InvokeServer("SummonRift", {
+            Type = "Egg",
+            Name = bountyEggName,
+            World = bountyWorld,
+            Time = 5,
+            Luck = 5,
+        })
+        summonSucceeded = true
+    end)
+    if summonSucceeded then
+        activeStates.BGSI_Lite_LastBountyRiftSpawnAt = tick()
+        activeStates.BGSI_Lite_LastBountyRiftEgg = bountyEggName
+        local spawnedRift
+        local spawnDeadline = tick() + 6
+        repeat
+            spawnedRift = activeStates.BGSI_Lite_FindNewSpawnedBountyRift(bountyEggName, riftsBefore)
+            if spawnedRift then
+                break
+            end
+            task.wait(0.25)
+        until tick() >= spawnDeadline
+        if spawnedRift then
+            activeStates.BGSI_Lite_RememberBountyRift(spawnedRift, bountyEggName)
+        end
+    end
+    return summonSucceeded
+end
 task.spawn(function()
+    local bountyRiftTeleportAt = 0
     while true do
+        task.wait(Config.spawnRift and 1 or 2)
         if not Config.spawnRift then
-            task.wait(2)
+            activeStates.BGSI_Lite_BountyRiftActive = false
             continue
         end
-        local scriptStateZL = stopLuckEggAutomation()
-            if scriptStateZL then
-            local bountyWorld =(scriptStateZL == "Mining Egg" or scriptStateZL == "Neon Egg" or scriptStateZL == "Cyber Egg") and "Minigame Paradise" or "The Overworld"
-            pcall(function()
-                remoteFunction:InvokeServer("SummonRift", {
-                    Type = "Egg",
-                    Name = scriptStateZL,
-                    World = bountyWorld,
-                    Time = 5,
-                    Luck = 5,
-                })
-            end)
+        local bountyEggName = stopLuckEggAutomation()
+        local bountyRiftObject = activeStates.BGSI_Lite_GetBountyRiftObject(bountyEggName)
+        if bountyRiftObject then
+            activeStates.BGSI_Lite_BountyRiftActive = true
+            activeStates.BGSI_Lite_LastBountyRiftEgg = bountyEggName
+            if tick() - bountyRiftTeleportAt >= 5 then
+                local bountyRiftCFrame = activeStates.BGSI_Lite_GetObjectCFrame(bountyRiftObject)
+                if bountyRiftCFrame then
+                    teleportToCFrame(bountyRiftCFrame + Vector3.new(3, 5, 0))
+                end
+                bountyRiftTeleportAt = tick()
+            end
+            fireHatchEgg(bountyEggName)
+        else
+            activeStates.BGSI_Lite_BountyRiftActive = false
+            activeStates.BGSI_Lite_SummonBountyRift(false)
         end
-        task.wait(3600)
     end
 end) do
     scriptStateCZ:AddSection("Present Rain")
@@ -4664,7 +4462,7 @@ do
     task.spawn(function()
         local riftActiveCooldown = 0
         while true do
-            task.wait(Config.autoRiftEgg and 0 or 0.85)
+            task.wait(Config.autoRiftEgg and 0.05 or 0.85)
             if not Config.autoRiftEgg then
                 activeStates.BGSI_Lite_RiftEggActive = false
                 continue
@@ -4827,8 +4625,7 @@ do
         "Pets",
         "Buffs",
         "Shops",
-        "Rift",
-        "Minigames"
+        "Rift"
     }
     gameTab:AddSection("Thangs")
     gameTab:AddToggle("AutoPlaytime", {
