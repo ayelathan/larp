@@ -5546,7 +5546,9 @@ local function getPetEnchantList(scriptStateHJ)
     }
     for loopSlotBP = 1, 2 do
         local scriptStateYE = scriptStateYY[loopSlotBP] or scriptStateYY[tostring(loopSlotBP)]
-            if type(scriptStateYE) == "table" then
+        if type(scriptStateYE) == "string" and scriptStateYE ~= "" then
+            scriptStateRI[loopSlotBP] = scriptStateYE
+        elseif type(scriptStateYE) == "table" then
             local scriptStateKR = scriptStateYE.Id or scriptStateYE.ID or scriptStateYE.Name or scriptStateYE.Enchant or ""
             if scriptStateKR and scriptStateKR ~= "" then
                 scriptStateRI[loopSlotBP] = tostring(scriptStateKR)
@@ -5583,6 +5585,65 @@ local function getEnchantData(scriptStateABA)
         end
     end
     return nil
+end
+local specialWebhookEnchantNames = {
+    shinyblessing = "Shiny Blessing",
+    infinityblessing = "Infinity Blessing",
+    mythicblessing = "Mythic Blessing",
+    burstblessing = "Burst Blessing",
+    bubblemachine = "Bubble Machine",
+    duplication = "Duplication",
+    hatchblessing = "Hatch Blessing",
+    luckboost = "Luck Boost",
+}
+local function getWebhookEnchantDisplayName(enchantName)
+    if type(enchantName) ~= "string" or enchantName == "" then
+        return nil
+    end
+    local normalizedName = normalizeEnchantName(enchantName)
+    if specialWebhookEnchantNames[normalizedName] then
+        return specialWebhookEnchantNames[normalizedName]
+    end
+    local enchantInfo = getEnchantData(enchantName)
+    if type(enchantInfo) == "table" then
+        for _, displayKey in ipairs({
+            "DisplayName",
+            "Name",
+            "Title",
+        }) do
+            if type(enchantInfo[displayKey]) == "string" and enchantInfo[displayKey] ~= "" then
+                return enchantInfo[displayKey]
+            end
+        end
+    end
+    local spacedName = tostring(enchantName):gsub("([a-z])([A-Z])", "%1 %2"):gsub("[_%-]+", " ")
+    return spacedName:gsub("(%a)([%w']*)", function(firstLetter, rest)
+        return firstLetter:upper()..rest:lower()
+    end)
+end
+local function getWebhookSuperLegendaryEnchantText(webhookPetEntry)
+    local enchantNames, seenEnchantNames = {}, {}
+    local function addEnchantSource(source)
+        local enchantList = getPetEnchantList(source)
+        for enchantSlot = 1, 2 do
+            local enchantName = enchantList[enchantSlot]
+            local displayName = getWebhookEnchantDisplayName(enchantName)
+            if displayName and not seenEnchantNames[displayName] then
+                seenEnchantNames[displayName] = true
+                table.insert(enchantNames, displayName)
+            end
+        end
+    end
+    if type(webhookPetEntry) == "table" then
+        addEnchantSource(webhookPetEntry)
+        addEnchantSource(webhookPetEntry.Pet)
+        addEnchantSource(webhookPetEntry.Data)
+        addEnchantSource(webhookPetEntry.Info)
+    end
+    if # enchantNames == 0 then
+        return nil
+    end
+    return "\240\159\147\153 Enchant: "..table.concat(enchantNames, ", ")
 end
 local function isSpecialEnchant(scriptStateADR)
     local scriptStateABZ = getEnchantData(scriptStateADR)
@@ -7887,6 +7948,12 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
                 table.insert(scriptStateYA, string.format("\226\128\140%s %s: +%s", scriptStateAAB, loopSlotCH, runShrineDonation(math.floor(scriptStateACC * scriptStateAFP))))
             end
         end
+        if isSuperLegendaryPet then
+            local superLegendaryEnchantText = getWebhookSuperLegendaryEnchantText(scriptStateACH)
+            if superLegendaryEnchantText then
+                table.insert(scriptStateYA, superLegendaryEnchantText)
+            end
+        end
         if scriptStateEQ.Tag and scriptStateEQ.Tag ~= "" then
             table.insert(scriptStateYA, "\240\159\143\183\239\184\143 Origins: "..tostring(scriptStateEQ.Tag))
         end
@@ -7955,7 +8022,7 @@ end)
 end
 pcall(activeStates.BGSI_Lite_InstallPetWebhookListener)
 activeStates.BGSI_Lite_InstallPetWebhookListener = nil
-do
+activeStates.BGSI_Lite_InstallRebirthCarnivalFeatures = function()
     local scriptStatePA = {
         "Normal",
         "Shiny",
@@ -8036,7 +8103,6 @@ do
             Config.AdminRebirthMachineEnabled = scriptStateYO;saveConfig()
         end,
     })
-end
 activeStates.CarnivalRebirthCountParagraph = nil
 activeStates.GetCarnivalRebirthCountText = function()
     if not profileStore or not profileStore.IsReady or not profileStore:IsReady() then
@@ -8582,7 +8648,11 @@ task.spawn(function()
         end
         task.wait(0.5)
     end
-end) do
+end)
+end
+pcall(activeStates.BGSI_Lite_InstallRebirthCarnivalFeatures)
+activeStates.BGSI_Lite_InstallRebirthCarnivalFeatures = nil
+do
     scriptStateAFW:AddSection("Performance")
     scriptStateAFW:AddToggle("DisableRendering", {
         Title = "Disable 3D Rendering (AFK / save GPU)",
