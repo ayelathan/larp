@@ -12,6 +12,18 @@ if type(getgenv) == "function" then
             globalEnv.FluentLite = nil
         end
     end)
+    pcall(function()
+        if type(getgc) == "function" then
+            for _, object in ipairs(getgc(true)) do
+                if type(object) == "table"
+                    and type(rawget(object, "webhookEnabled")) == "boolean"
+                    and type(rawget(object, "webhookURL")) == "string"
+                    and rawget(object, "selectedEgg") ~= nil then
+                    object.webhookEnabled = false
+                end
+            end
+        end
+    end)
             local previousCleanup = rawget(globalEnv, "_1rzHubLitePetViewerCleanup")
             if type(previousCleanup) == "function" then
         pcall(previousCleanup)
@@ -101,9 +113,11 @@ local configFile = "1rzHubLiteConfig.json"
     equippedTargetEnchantLevel = 0,
     equippedEnchantCurrency = "Auto (Secret = Crystals,Normal = Gems)",
     autoPlaytime = false,
+    autoClaimJuly4thRewards = false,
     autoEquipBestPets = false,
     autoUpgradeMastery = false,
     autoCollectCoins = false,
+    autoUseFragments = false,
     autoCollectCarnivalCoins = false,
     autoCarnivalChest = false,
     autoBuyShops = false,
@@ -209,6 +223,56 @@ local function saveConfig()
     pcall(function()
         writefile(configFile, HttpService:JSONEncode(Config))
     end)
+end
+
+local webhookHatchTrackerFile = "1rzHubLiteWebhookHatchTracker.json"
+local function loadWebhookHatchTracker()
+    local tracker = {}
+    if isfile and isfile(webhookHatchTrackerFile) then
+        local ok, savedTracker = pcall(function()
+            return HttpService:JSONDecode(readfile(webhookHatchTrackerFile))
+        end)
+        if ok and type(savedTracker) == "table" then
+            for petName, hatchCount in pairs(savedTracker) do
+                if type(petName) == "string" then
+                    local numericCount = tonumber(hatchCount)
+                    if numericCount and numericCount > 0 then
+                        tracker[petName] = math.floor(numericCount)
+                    end
+                end
+            end
+        end
+    end
+    return tracker
+end
+
+local function saveWebhookHatchTracker()
+    if not writefile then
+        return
+    end
+    local tracker = activeStates and activeStates.BGSI_Lite_WebhookHatchTracker
+    if type(tracker) ~= "table" then
+        return
+    end
+    local mergedTracker = loadWebhookHatchTracker()
+    for petName, hatchCount in pairs(tracker) do
+        if type(petName) == "string" then
+            local numericCount = tonumber(hatchCount)
+            if numericCount and numericCount > 0 then
+                mergedTracker[petName] = math.max(tonumber(mergedTracker[petName]) or 0, math.floor(numericCount))
+            end
+        end
+    end
+    for petName, hatchCount in pairs(mergedTracker) do
+        tracker[petName] = hatchCount
+    end
+    pcall(function()
+        writefile(webhookHatchTrackerFile, HttpService:JSONEncode(mergedTracker))
+    end)
+    local refreshedTracker = loadWebhookHatchTracker()
+    for petName, hatchCount in pairs(refreshedTracker) do
+        tracker[petName] = math.max(tonumber(tracker[petName]) or 0, hatchCount)
+    end
 end
 
 -- Helper function to safely require modules
@@ -2551,6 +2615,12 @@ if type(getgenv) == "function" then
             if activeStates._1rzHubLiteRunToken == currentRunToken then
                 activeStates._1rzHubLiteRunToken = nil
             end
+            pcall(function()
+                if activeStates.BGSI_Lite_WebhookConnection then
+                    activeStates.BGSI_Lite_WebhookConnection:Disconnect()
+                    activeStates.BGSI_Lite_WebhookConnection = nil
+                end
+            end)
             activeStates.FluentLite = nil
             activeStates.LoadedMobileUI = false
             activeStates._1rzHubLite_Loaded = false
@@ -4627,12 +4697,144 @@ do
         "Shops",
         "Rift"
     }
+    local fragmentNames = {
+        "Green Fragment",
+        "Red Fragment",
+        "Blue Fragment",
+        "Yellow Fragment",
+        "Purple Fragment",
+        "Orange Fragment",
+        "Rainbow Fragment",
+    }
+    local function getFragmentNames()
+        local names, seenNames = {}, {}
+        local function addFragmentName(fragmentName)
+            if type(fragmentName) == "string" and fragmentName ~= "" and string.find(string.lower(fragmentName), "fragment", 1, true) and not seenNames[fragmentName] then
+                seenNames[fragmentName] = true
+                table.insert(names, fragmentName)
+            end
+        end
+        for _, fragmentName in ipairs(fragmentNames) do
+            addFragmentName(fragmentName)
+        end
+        for _, dataTable in ipairs({
+            giftData,
+            potionData,
+        }) do
+            if type(dataTable) == "table" then
+                for itemName in pairs(dataTable) do
+                    addFragmentName(itemName)
+                end
+            end
+        end
+        table.sort(names)
+        return names
+    end
+    local function claimJuly4thRewards()
+        pcall(function()
+            remoteEvent:FireServer("July4thEventLoginsClaim")
+        end)
+    end
+    local function getInventoryItemAmount(itemName)
+        if type(itemName) ~= "string" or itemName == "" then
+            return 0
+        end
+        local ok, playerData = pcall(function()
+            return profileStore:IsReady() and profileStore:Get() or nil
+        end)
+        if not ok or type(playerData) ~= "table" then
+            return 0
+        end
+        local function amountFromValue(value, depth)
+            depth = tonumber(depth) or 0
+            if depth > 4 or value == nil then
+                return 0
+            end
+            if type(value) == "number" then
+                return value
+            end
+            if type(value) ~= "table" then
+                return 0
+            end
+            local directAmount = tonumber(value.Amount or value.amount or value.Count or value.count or value.Quantity or value.quantity)
+            if directAmount then
+                return directAmount
+            end
+            local totalAmount = 0
+            for _, childValue in pairs(value) do
+                if type(childValue) == "table" then
+                    local childName = childValue.Name or childValue.name or childValue.Item or childValue.item or childValue.Type or childValue.type
+                    if childName == itemName then
+                        totalAmount = totalAmount + amountFromValue(childValue, depth + 1)
+                    end
+                end
+            end
+            return totalAmount
+        end
+        local highestAmount = 0
+        for _, containerName in ipairs({
+            "Powerups",
+            "Items",
+            "Gifts",
+            "Inventory",
+            "Currencies",
+        }) do
+            local container = playerData[containerName]
+            if type(container) == "table" then
+                highestAmount = math.max(highestAmount, amountFromValue(container[itemName], 0))
+            end
+        end
+        if itemUtil and type(itemUtil.GetOwnedAmount) == "function" then
+            for _, itemPayload in ipairs({
+                itemName,
+                {
+                    Type = "Powerup",
+                    Name = itemName,
+                },
+                {
+                    Type = "Item",
+                    Name = itemName,
+                },
+            }) do
+                local itemOk, ownedAmount = pcall(function()
+                    return itemUtil:GetOwnedAmount(playerData, itemPayload)
+                end)
+                if itemOk and type(ownedAmount) == "number" then
+                    highestAmount = math.max(highestAmount, ownedAmount)
+                end
+            end
+        end
+        return math.max(0, math.floor(highestAmount))
+    end
+    local function useFragment(fragmentName, amount)
+        amount = math.max(1, math.floor(tonumber(amount) or 1))
+        pcall(function()
+            remoteEvent:FireServer("UseGift", fragmentName, amount)
+        end)
+        pcall(function()
+            remoteEvent:FireServer("UsePowerup", fragmentName, amount)
+        end)
+        pcall(function()
+            remoteEvent:FireServer("UseItem", fragmentName, amount)
+        end)
+    end
     gameTab:AddSection("Thangs")
     gameTab:AddToggle("AutoPlaytime", {
         Title = "Claim Playtime",
         Default = Config.autoPlaytime,
         Callback = function(scriptStateFS)
             Config.autoPlaytime = scriptStateFS;saveConfig()
+        end,
+    })
+    gameTab:AddToggle("AutoClaimJuly4thRewards", {
+        Title = "Claim 4th Rewards",
+        Default = Config.autoClaimJuly4thRewards,
+        Callback = function(isEnabled)
+            Config.autoClaimJuly4thRewards = isEnabled
+            saveConfig()
+            if isEnabled then
+                claimJuly4thRewards()
+            end
         end,
     })
     gameTab:AddToggle("AutoEquipBestPets", {
@@ -4678,6 +4880,13 @@ do
         Default = Config.autoSell,
         Callback = function(scriptStateAEL)
             Config.autoSell = scriptStateAEL;saveConfig()
+        end,
+    })
+    gameTab:AddToggle("AutoUseFragments", {
+        Title = "Auto Use Fragments",
+        Default = Config.autoUseFragments,
+        Callback = function(isEnabled)
+            Config.autoUseFragments = isEnabled;saveConfig()
         end,
     })
 
@@ -5105,6 +5314,16 @@ do
         end
     end)
     task.spawn(function()
+        local lastJuly4thClaimAt = 0
+        while true do
+            task.wait(Config.autoClaimJuly4thRewards and 5 or 0.85)
+            if Config.autoClaimJuly4thRewards and tick() - lastJuly4thClaimAt >= 1800 then
+                claimJuly4thRewards()
+                lastJuly4thClaimAt = tick()
+            end
+        end
+    end)
+    task.spawn(function()
         while true do
             task.wait(Config.autoEquipBestPets and 3 or 0.85)
             if Config.autoEquipBestPets then
@@ -5182,6 +5401,23 @@ do
             task.wait(Config.autoSell and 1 or 0.85)
             if Config.autoSell and not isPriorityAutomationActive() then
                 activeStates.BGSI_Lite_SellBubble()
+            end
+        end
+    end)
+    task.spawn(function()
+        while true do
+            task.wait(Config.autoUseFragments and 5 or 0.85)
+            if Config.autoUseFragments then
+                for _, fragmentName in ipairs(getFragmentNames()) do
+                    if not Config.autoUseFragments then
+                        break
+                    end
+                    local fragmentAmount = getInventoryItemAmount(fragmentName)
+                    if fragmentAmount > 0 then
+                        useFragment(fragmentName, fragmentAmount)
+                        task.wait(0.2)
+                    end
+                end
             end
         end
     end)
@@ -7245,6 +7481,37 @@ local function runRebirthMachineLoop(scriptStateEI, scriptStateOR, scriptStateXO
     if not Config.webhookEnabled or Config.webhookURL == "" then
         return
     end
+    activeStates.BGSI_Lite_WebhookSendCache = type(activeStates.BGSI_Lite_WebhookSendCache) == "table" and activeStates.BGSI_Lite_WebhookSendCache or {}
+    local sendCache = activeStates.BGSI_Lite_WebhookSendCache
+    local now = tick()
+    for cacheKey, cacheTime in pairs(sendCache) do
+        if now - cacheTime > 120 then
+            sendCache[cacheKey] = nil
+        end
+    end
+    local petInfoText, chanceText = "", ""
+    if type(scriptStateXO) == "table" then
+        for _, field in ipairs(scriptStateXO) do
+            if type(field) == "table" then
+                if field.name == "Pet Info" then
+                    petInfoText = tostring(field.value or "")
+                elseif field.name == "Chance" then
+                    chanceText = tostring(field.value or "")
+                end
+            end
+        end
+    end
+    local duplicateKey = table.concat({
+        tostring(scriptStateYR or scriptStateEI or ""),
+        tostring(scriptStateOR or ""),
+        tostring(scriptStateBZ or ""),
+        petInfoText ~= "" and petInfoText or HttpService:JSONEncode(scriptStateXO or {}),
+        chanceText,
+    }, "|")
+    if sendCache[duplicateKey] and now - sendCache[duplicateKey] < 90 then
+        return
+    end
+    sendCache[duplicateKey] = now
     local scriptStateABR = getShrineLevelValue(Config.webhookURL)
     for loopSlotBY, webhookURLEntry in ipairs(scriptStateABR) do
         local scriptStateAAK = Config.webhookHidePlayerName == true
@@ -7432,7 +7699,103 @@ task.spawn(function()
         end
     end
 end)
-remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
+activeStates.BGSI_Lite_InstallPetWebhookListener = function()
+pcall(function()
+    if activeStates.BGSI_Lite_WebhookConnection then
+        activeStates.BGSI_Lite_WebhookConnection:Disconnect()
+        activeStates.BGSI_Lite_WebhookConnection = nil
+    end
+end)
+activeStates.BGSI_Lite_RecentPetWebhookKeys = type(activeStates.BGSI_Lite_RecentPetWebhookKeys) == "table" and activeStates.BGSI_Lite_RecentPetWebhookKeys or {}
+local recentPetWebhookKeys = activeStates.BGSI_Lite_RecentPetWebhookKeys
+local function isSuperLegendaryWebhookPet(webhookPetEntry, petData)
+    if type(petData) == "table" then
+        if petData.Super == true or petData.SuperLegendary == true or petData.Celestial == true then
+            return true
+        end
+        for _, value in pairs(petData) do
+            if type(value) == "string" and string.lower(value):find("super", 1, true) then
+                return true
+            end
+        end
+    end
+    if type(webhookPetEntry) == "table" then
+        if webhookPetEntry.Super == true or webhookPetEntry.SuperLegendary == true or webhookPetEntry.Celestial == true then
+            return true
+        end
+        local nestedPet = webhookPetEntry.Pet
+        if type(nestedPet) == "table" and (nestedPet.Super == true or nestedPet.SuperLegendary == true or nestedPet.Celestial == true) then
+            return true
+        end
+        for _, value in pairs(webhookPetEntry) do
+            if type(value) == "string" and string.lower(value):find("super", 1, true) then
+                return true
+            end
+        end
+        if type(nestedPet) == "table" then
+            for _, value in pairs(nestedPet) do
+                if type(value) == "string" and string.lower(value):find("super", 1, true) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+local function shouldSendPetWebhookEntry(webhookPetEntry, petName, petRarity, isShiny, isMythic, isXL)
+    local now = tick()
+    for webhookKey, webhookSentAt in pairs(recentPetWebhookKeys) do
+        if now - webhookSentAt > 120 then
+            recentPetWebhookKeys[webhookKey] = nil
+        end
+    end
+    local petObject = type(webhookPetEntry) == "table" and webhookPetEntry.Pet or nil
+    local petId = type(webhookPetEntry) == "table" and (webhookPetEntry.Id or webhookPetEntry.ID or webhookPetEntry.Guid or webhookPetEntry.GUID or webhookPetEntry.UUID or webhookPetEntry.uuid) or nil
+    if petId == nil and type(petObject) == "table" then
+        petId = petObject.Id or petObject.ID or petObject.Guid or petObject.GUID or petObject.UUID or petObject.uuid
+    end
+    local webhookKey
+    local duplicateWindow = 90
+    if petId ~= nil and tostring(petId) ~= "" then
+        webhookKey = "id|"..tostring(petId)
+        duplicateWindow = 120
+    else
+        webhookKey = table.concat({
+            "pet",
+            tostring(petName or ""),
+            tostring(petRarity or ""),
+            tostring(isShiny == true),
+            tostring(isMythic == true),
+            tostring(isXL == true),
+        }, "|")
+    end
+    if recentPetWebhookKeys[webhookKey] and now - recentPetWebhookKeys[webhookKey] < duplicateWindow then
+        return false
+    end
+    recentPetWebhookKeys[webhookKey] = now
+    return true
+end
+local savedWebhookHatchTracker = loadWebhookHatchTracker()
+activeStates.BGSI_Lite_WebhookHatchTracker = type(activeStates.BGSI_Lite_WebhookHatchTracker) == "table" and activeStates.BGSI_Lite_WebhookHatchTracker or {}
+for petDisplayName, savedHatchCount in pairs(savedWebhookHatchTracker) do
+    activeStates.BGSI_Lite_WebhookHatchTracker[petDisplayName] = math.max(tonumber(activeStates.BGSI_Lite_WebhookHatchTracker[petDisplayName]) or 0, savedHatchCount)
+end
+local function incrementWebhookHatchTracker(petDisplayName)
+    petDisplayName = tostring(petDisplayName or "Unknown")
+    local latestTracker = loadWebhookHatchTracker()
+    for savedPetName, savedHatchCount in pairs(latestTracker) do
+        activeStates.BGSI_Lite_WebhookHatchTracker[savedPetName] = math.max(tonumber(activeStates.BGSI_Lite_WebhookHatchTracker[savedPetName]) or 0, savedHatchCount)
+    end
+    local currentCount = math.max(tonumber(activeStates.BGSI_Lite_WebhookHatchTracker[petDisplayName]) or 0, tonumber(latestTracker[petDisplayName]) or 0)
+    currentCount = currentCount + 1
+    activeStates.BGSI_Lite_WebhookHatchTracker[petDisplayName] = currentCount
+    saveWebhookHatchTracker()
+    return currentCount
+end
+activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
+    if not isCurrentRun() then
+        return
+    end
     if not Config.webhookEnabled then
         return
     end
@@ -7465,15 +7828,19 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
             task.wait(0.1)
         end
         local scriptStateFL = scriptStateACH.Name or(scriptStateACH.Pet and scriptStateACH.Pet.Name) or "Unknown"
-            local scriptStateEQ = petRarityData and petRarityData[scriptStateFL] or {
+        local scriptStateEQ = petRarityData and petRarityData[scriptStateFL] or {
         }
         local scriptStatePG = tostring(scriptStateEQ.Rarity or "Unknown")
-            if scriptStatePG ~= "Secret" and scriptStatePG ~= "Infinity" then
+        local isSuperLegendaryPet = isSuperLegendaryWebhookPet(scriptStateACH, scriptStateEQ)
+            if scriptStatePG ~= "Secret" and scriptStatePG ~= "Infinity" and not isSuperLegendaryPet then
             continue
         end
         local scriptStateLS = scriptStateACH.Shiny or(scriptStateACH.Pet and scriptStateACH.Pet.Shiny) or false
             local scriptStateNI = scriptStateACH.Mythic or(scriptStateACH.Pet and scriptStateACH.Pet.Mythic) or false
         local scriptStateKK = scriptStateACH.XL or(scriptStateACH.Pet and scriptStateACH.Pet.XL) or false
+        if not shouldSendPetWebhookEntry(scriptStateACH, scriptStateFL, scriptStatePG, scriptStateLS, scriptStateNI, scriptStateKK) then
+            continue
+        end
         local scriptStateKY = 3447003
             if scriptStatePG == "Secret" then
             if scriptStateLS and scriptStateNI then
@@ -7495,6 +7862,8 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
             else
                 scriptStateKY = 10181046
             end
+        elseif isSuperLegendaryPet then
+            scriptStateKY = 16766720
         end
         local scriptStateAK = getWebhookRequestFunction()
             local scriptStateVZ = getDiscordTimestamp()
@@ -7522,9 +7891,10 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
             table.insert(scriptStateYA, "\240\159\143\183\239\184\143 Origins: "..tostring(scriptStateEQ.Tag))
         end
         local scriptStateZY =(# scriptStateYA > 0) and table.concat(scriptStateYA, "\n") or "No stats available"
-            local scriptStateVN = buildPetWebhookEmbed(scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
-        local scriptStateBR = getPetVariantName(scriptStateVN)
-        scriptStateZY = scriptStateZY.."\n\nExist: "..(scriptStateBR and runShrineDonation(scriptStateBR) or "—")
+        local webhookPetDisplayName = buildPetWebhookEmbed(scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
+        local scriptStateBR = getPetVariantName(webhookPetDisplayName)
+        local webhookHatchCount = incrementWebhookHatchTracker(webhookPetDisplayName)
+        scriptStateZY = scriptStateZY.."\n\nExist: "..(scriptStateBR and runShrineDonation(scriptStateBR) or "—").."\nYou've hatched this pet "..runShrineDonation(webhookHatchCount).." "..(webhookHatchCount == 1 and "time!" or "times!")
         local scriptStateMO = checkLowCurrencyWebhook(scriptStateFL, scriptStateEQ)
             local scriptStateAEC = 100 / scriptStateMO
         local scriptStateYS = 1
@@ -7548,7 +7918,7 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
             scriptStateXK = string.format("%s | %s: 1/%s (%s)", scriptStateBX, scriptStateAEG, runShrineDonation(math.floor(scriptStateDO)), normalizeVariantList(scriptStatePV))
         end
         local scriptStateWG = sendPetWebhook(scriptStateEQ, scriptStateLS, scriptStateNI)
-            local scriptStateAEB = scriptStatePG
+            local scriptStateAEB = isSuperLegendaryPet and "Super Legendary" or scriptStatePG
             if scriptStateEQ.Celestial == true then
             scriptStateAEB = "Celestial"
         elseif scriptStateEQ.Infinity == true then
@@ -7581,7 +7951,11 @@ remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
             },
         }, scriptStateWG, scriptStateGO)
     end
-end) do
+end)
+end
+pcall(activeStates.BGSI_Lite_InstallPetWebhookListener)
+activeStates.BGSI_Lite_InstallPetWebhookListener = nil
+do
     local scriptStatePA = {
         "Normal",
         "Shiny",
