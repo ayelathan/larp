@@ -102,6 +102,7 @@ local configFile = "1rzHubLiteConfig.json"
     autoBounty = false,
     spawnRift = false,
     autoLuckEgg = false,
+    autoSpecialRift = false,
     potionType = "Speed",
     potionLevel = 1,
     potionUseAmount = 10,
@@ -2153,6 +2154,72 @@ local function getRenderedGiftFolders()
     return giftFolders
 end
 
+local function getGiftClaimIds(giftInstance)
+    local giftIds, seenGiftIds = {}, {}
+    local function addGiftId(giftId)
+        if giftId == nil then
+            return
+        end
+        local giftIdText = tostring(giftId)
+        if giftIdText ~= "" and not seenGiftIds[giftIdText] then
+            seenGiftIds[giftIdText] = true
+            table.insert(giftIds, giftId)
+        end
+    end
+    if typeof(giftInstance) ~= "Instance" then
+        return giftIds
+    end
+    addGiftId(giftInstance.Name)
+    for _, attributeName in ipairs({
+        "Id",
+        "ID",
+        "Guid",
+        "GUID",
+        "GiftId",
+        "GiftID",
+        "PickupId",
+        "PickupID",
+    }) do
+        addGiftId(giftInstance:GetAttribute(attributeName))
+    end
+    for _, childName in ipairs({
+        "Id",
+        "ID",
+        "Guid",
+        "GUID",
+        "GiftId",
+        "GiftID",
+    }) do
+        local childValue = giftInstance:FindFirstChild(childName)
+        if childValue and childValue:IsA("ValueBase") then
+            addGiftId(childValue.Value)
+        end
+    end
+    return giftIds
+end
+
+local function fireGiftClaimRemote(giftId)
+    if giftId == nil or tostring(giftId) == "" then
+        return
+    end
+    for _, claimAction in ipairs({
+        "ClaimGift",
+        "OpenGift",
+        "CollectGift",
+        "PickupGift",
+    }) do
+        pcall(function()
+            remoteEvent:FireServer(claimAction, giftId)
+        end)
+        pcall(function()
+            remoteEvent:FireServer(claimAction, giftId, true)
+        end)
+        pcall(function()
+            remoteEvent:FireServer(claimAction, giftId, false)
+        end)
+    end
+end
+
 local function claimAllRenderedGifts()
     local giftFolders = getRenderedGiftFolders()
     if #giftFolders == 0 then
@@ -2161,12 +2228,22 @@ local function claimAllRenderedGifts()
     local claimedGifts = 0
     for _, giftFolder in ipairs(giftFolders) do
         for _, giftInstance in ipairs(giftFolder:GetChildren()) do
-            pcall(function()
-                remoteEvent:FireServer("ClaimGift", giftInstance.Name)
-            end)
+            for _, giftId in ipairs(getGiftClaimIds(giftInstance)) do
+                fireGiftClaimRemote(giftId)
+            end
             claimedGifts = claimedGifts + 1
         end
     end
+    return claimedGifts
+end
+
+local function claimRenderedGiftsForDuration(durationSeconds)
+    local claimedGifts = 0
+    local claimUntil = tick() + math.max(0.1, tonumber(durationSeconds) or 1)
+    repeat
+        claimedGifts = claimedGifts + claimAllRenderedGifts()
+        task.wait(0.1)
+    until tick() >= claimUntil
     return claimedGifts
 end
 
@@ -2175,10 +2252,7 @@ local function useMysteryBoxesForPearls()
     pcall(function()
         remoteEvent:FireServer("UseGift", selectedBox, 50)
     end)
-    local claimedGifts = claimAllRenderedGifts()
-    task.wait()
-    claimedGifts = claimedGifts + claimAllRenderedGifts()
-    return claimedGifts
+    return claimRenderedGiftsForDuration(1.5)
 end
 
 local function runTicketPickupTask(scriptStateGetQuest, scriptStateTaskIndex, scriptStateRequirement, scriptStateShouldContinue)
@@ -3311,8 +3385,20 @@ do
             Config.autoLuckEgg = scriptStateGE;saveConfig()
         end,
     })
+    eggTab:AddToggle("AutoSpecialRift", {
+        Title = "Auto Special Rift",
+        Default = Config.autoSpecialRift,
+        Callback = function(isEnabled)
+            Config.autoSpecialRift = isEnabled
+            if not isEnabled then
+                activeStates.BGSI_Lite_SpecialRiftActive = false
+            end
+            saveConfig()
+        end,
+    })
 end
 activeStates.BGSI_Lite_LuckEggActive = false
+activeStates.BGSI_Lite_SpecialRiftActive = false
 task.spawn(function()
     local luckEggCooldown = 0
     while true do
@@ -3331,6 +3417,13 @@ task.spawn(function()
                 luckEggCooldown = 0
             end
             task.wait(1)
+            continue
+        end
+        if activeStates.BGSI_Lite_SpecialRiftActive then
+            if activeStates.BGSI_Lite_LuckEggActive then
+                activeStates.BGSI_Lite_LuckEggActive = false
+            end
+            task.wait(0.2)
             continue
         end
         activeStates.BGSI_Lite_LuckEggActive = true
@@ -3363,7 +3456,7 @@ task.spawn(function()
             continue
         end
         clearDisabledPriorityStates()
-        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
+        if isPriorityAutomationActive() or activeStates.BGSI_Lite_SpecialRiftActive or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
             continue
         end
         local scriptStateRX = LocalPlayer and LocalPlayer.Character
@@ -3848,7 +3941,7 @@ task.spawn(function()
         if Config.autoBounty ~= true then
             continue
         end
-        if isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
+        if isPriorityAutomationActive() or activeStates.BGSI_Lite_SpecialRiftActive or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
             continue
         end
         local scriptStateCI = stopLuckEggAutomation()
@@ -4540,7 +4633,7 @@ do
             local scriptStateON = resolveAllRiftSelection(Config.selectedRiftEgg)
             local scriptStateUN = scriptStateON and findMatchingRift(scriptStateON)
             activeStates.BGSI_Lite_RiftEggActive = scriptStateUN ~= nil
-            if not scriptStateUN or isPriorityAutomationActive() or activeStates.BGSI_Lite_LuckEggActive then
+            if not scriptStateUN or isPriorityAutomationActive() or activeStates.BGSI_Lite_SpecialRiftActive or activeStates.BGSI_Lite_LuckEggActive then
                 continue
             end
             if tick() - riftActiveCooldown >= 5 then
@@ -4551,6 +4644,101 @@ do
                 riftActiveCooldown = tick()
             end
             fireHatchEgg(getRiftEggName(scriptStateON))
+        end
+    end)
+    local function riftTextLooksLikeDoodleEgg(textValue)
+        if type(textValue) ~= "string" or textValue == "" then
+            return false
+        end
+        local loweredText = string.lower(textValue)
+        return string.find(loweredText, "doodle egg", 1, true) ~= nil
+            or string.find(loweredText, "doodle%-rift") ~= nil
+            or (string.find(loweredText, "doodle", 1, true) ~= nil and string.find(loweredText, "egg", 1, true) ~= nil)
+    end
+    local function getDoodleRiftEggName(riftObject)
+        local riftInfoEntry = riftObject and type(riftData) == "table" and riftData[riftObject.Name] or nil
+        if type(riftInfoEntry) == "table" and riftInfoEntry.Type == "Egg" and type(riftInfoEntry.Egg) == "string" and riftInfoEntry.Egg ~= "" then
+            return riftInfoEntry.Egg
+        end
+        return "Doodle Egg"
+    end
+    local function isDoodleRiftObject(riftObject)
+        if typeof(riftObject) ~= "Instance" then
+            return false
+        end
+        if riftTextLooksLikeDoodleEgg(riftObject.Name) then
+            return true
+        end
+        local riftInfoEntry = type(riftData) == "table" and riftData[riftObject.Name] or nil
+        if type(riftInfoEntry) == "table" then
+            if riftInfoEntry.Type == "Egg" and riftTextLooksLikeDoodleEgg(riftInfoEntry.Egg) then
+                return true
+            end
+            if riftTextLooksLikeDoodleEgg(riftInfoEntry.Name) or riftTextLooksLikeDoodleEgg(riftInfoEntry.DisplayName) then
+                return true
+            end
+        end
+        for _, attributeName in ipairs({
+            "Egg",
+            "EggName",
+            "Name",
+            "DisplayName",
+        }) do
+            if riftTextLooksLikeDoodleEgg(riftObject:GetAttribute(attributeName)) then
+                return true
+            end
+        end
+        local descendantsOk, descendants = pcall(function()
+            return riftObject:GetDescendants()
+        end)
+        if descendantsOk and type(descendants) == "table" then
+            for _, descendant in ipairs(descendants) do
+                if (descendant:IsA("TextLabel") or descendant:IsA("TextButton")) and riftTextLooksLikeDoodleEgg(descendant.Text) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    local function findDoodleRift()
+        local riftsFolder = getPotionList("Rifts")
+        if not riftsFolder then
+            return nil
+        end
+        local bestRift, bestLuck = nil, - 1
+        for _, riftObject in ipairs(riftsFolder:GetChildren()) do
+            if isDoodleRiftObject(riftObject) then
+                local riftLuck = getRiftIconImage(riftObject)
+                if riftLuck > bestLuck then
+                    bestRift, bestLuck = riftObject, riftLuck
+                end
+            end
+        end
+        return bestRift
+    end
+    task.spawn(function()
+        local specialRiftTeleportAt = 0
+        while true do
+            task.wait(Config.autoSpecialRift and 0.05 or 0.85)
+            if Config.autoSpecialRift ~= true then
+                activeStates.BGSI_Lite_SpecialRiftActive = false
+                specialRiftTeleportAt = 0
+                continue
+            end
+            local doodleRift = findDoodleRift()
+            activeStates.BGSI_Lite_SpecialRiftActive = doodleRift ~= nil
+            if not doodleRift then
+                specialRiftTeleportAt = 0
+                continue
+            end
+            if tick() - specialRiftTeleportAt >= 1.5 then
+                local doodleRiftCFrame = getPotionDisplayName(doodleRift)
+                if doodleRiftCFrame then
+                    teleportToCFrame(doodleRiftCFrame + Vector3.new(3, 5, 0))
+                end
+                specialRiftTeleportAt = tick()
+            end
+            fireHatchEgg(getDoodleRiftEggName(doodleRift))
         end
     end)
 end
@@ -5422,17 +5610,6 @@ do
         end
     end)
     task.spawn(function()
-        local function claimAllGifts()
-            local scriptStateWK = getPotionList("Gifts")
-            if not scriptStateWK then
-                return
-            end
-            for loopSlotJ, scriptStateKA in ipairs(scriptStateWK:GetChildren()) do
-                pcall(function()
-                    remoteEvent:FireServer("ClaimGift", scriptStateKA.Name)
-                end)
-            end
-        end
         while true do
             local scriptStateIP = math.clamp(tonumber(Config.autoOpenMysteryDelay) or 0.2, 0.1, 60)
             task.wait(Config.autoOpenMystery and scriptStateIP or 0.85)
@@ -5440,9 +5617,7 @@ do
                 pcall(function()
                     remoteEvent:FireServer("UseGift", Config.selectedMysteryBox, 50)
                 end)
-                claimAllGifts()
-                task.wait()
-                claimAllGifts()
+                claimRenderedGiftsForDuration(math.max(1.25, math.min(2.5, scriptStateIP)))
             end
         end
     end)
