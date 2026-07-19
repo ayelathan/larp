@@ -5895,137 +5895,174 @@ do
         local pendingDashboardCommandResults = {}
         local lastInventorySignature
         local dashboardConfigKeys = {
-            "dashboardEndpoint",
-            "autoHatch",
-            "selectedEgg",
-            "autoRiftEgg",
-            "selectedRiftEgg",
-            "noHatchAnim",
-            "autoLuckEgg",
-            "autoHopLuckEgg",
-            "autoBubble",
-            "autoSell",
-            "autoClaimPrizes",
-            "autoUseFragments",
-            "autoEquipBestPets",
-            "autoEnchant",
-            "autoPlaytime",
-            "disableRendering",
-            "renderDistance",
-            "chunkerRenderDistance",
+            -- Eggs
+            "selectedEgg", "selectedEggLocationPriorities", "autoHatch",
+            "noHatchAnim", "autoSpamE", "autoBounty", "spawnRift",
+            "autoLuckEgg", "autoHopLuckEgg", "autoSpecialRift",
+            "selectedRiftEgg", "autoRiftEgg", "autoRiftEggSpawn",
+
+            -- Carnival and events
+            "autoCollectCarnivalCoins", "AutoCarnivalRebirth",
+            "autoGuessThatPet", "autoCarnivalChest",
+            "autoCollectPresentRain",
+
+            -- Chests and potions
+            "selectedWorldChest", "autoClaimWorldChest", "selectedChest",
+            "autoChestSummon", "autoChest", "potionType", "potionLevel",
+            "potionUseAmount", "potionAuto",
+
+            -- General game automation
+            "autoPlaytime", "autoClaimPrizes", "autoClaimJuly4thRewards",
+            "autoEquipBestPets", "autoUpgradeMastery", "autoPowerOrbEquipped",
+            "autoCollectCoins", "autoBubble", "autoSell", "autoUseFragments",
+            "selectedShops", "selectedShopItems", "shopInterval", "autoBuyShops",
+            "selectedMysteryBox", "autoOpenMystery", "autoOpenMysteryDelay",
+
+            -- Enchants and quests
+            "autoEnchant", "equippedTargetEnchant", "equippedTargetEnchant2",
+            "equippedTargetEnchantLevel", "equippedEnchantCurrency",
+            "gemGenieTargetItem", "autoGemGenie", "optimisedGemGenie",
+            "autoSeason", "autoChallengePassQuests",
+            "autoClaimChallengePassRewards", "autoResetChallengePass",
+            "autoDailyHourlyChallenge", "selectedTicketTeam",
+            "selectedTicketReturnTeam", "selectedPearlTeam",
+            "selectedPearlReturnTeam", "autoGlobalIncentive",
+            "autoClaimGlobalIncentive",
+
+            -- Shrines
+            "DreamerShrineEnabled", "DreamerShrineAmount", "shrineAuto",
+            "shrineLevel", "shrinePotion", "shrineAmount",
+
+            -- Webhook preferences. The URL is accepted from authenticated
+            -- dashboard commands, but is never included in heartbeat telemetry.
+            "webhookEnabled", "webhookURL", "webhookHidePlayerName", "webhookPingEnabled",
+            "webhookPingUserId", "webhookLowCurrencyEnabled",
+            "webhookLowCoinsBelow", "webhookLowGemsBelow",
+            "webhookLowPearlsBelow", "webhookLowTicketsBelow",
+            "webhookLowCurrencyCooldownMinutes", "webhookRarities",
+
+            -- Rebirth and performance
+            "RebirthPetName", "AdminRebirthPetName", "RebirthVariants",
+            "RebirthMachineEnabled", "AdminRebirthMachineEnabled",
+            "disableRendering", "renderDistance", "chunkerRenderDistance",
+
+            -- Safe dashboard preference; endpoint/token/runtime state stay local.
+            "dashboardSyncEnabled",
         }
         local dashboardConfigKeySet = {}
         for _, configKey in ipairs(dashboardConfigKeys) do
             dashboardConfigKeySet[configKey] = true
         end
 
-        local function getDashboardLuckPercent()
-            local luckMultiplier = 1
-            pcall(function()
-                local playerData = profileStore:IsReady() and profileStore:Get() or nil
-                local playerWorld = dashboardWorldUtil and dashboardWorldUtil:GetPlayerWorld(LocalPlayer) or "The Overworld"
-                if playerData and dashboardStatsUtil and type(dashboardStatsUtil.GetLuckMultiplier) == "function" then
-                    luckMultiplier = tonumber(dashboardStatsUtil:GetLuckMultiplier(LocalPlayer, playerData, playerWorld, true)) or 1
-                end
-            end)
-            return math.max(0, (luckMultiplier - 1) * 100)
-        end
+        task.spawn(function()
+            local function getDashboardLuckPercent()
+                local luckMultiplier = 1
+                pcall(function()
+                    local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                    local playerWorld = dashboardWorldUtil and dashboardWorldUtil:GetPlayerWorld(LocalPlayer) or "The Overworld"
+                    if playerData and dashboardStatsUtil and type(dashboardStatsUtil.GetLuckMultiplier) == "function" then
+                        luckMultiplier = tonumber(dashboardStatsUtil:GetLuckMultiplier(LocalPlayer, playerData, playerWorld, true)) or 1
+                    end
+                end)
+                return math.max(0, (luckMultiplier - 1) * 100)
+            end
 
-        local function buildDashboardServerPlayers()
-            local serverPlayers = {}
-            for _, serverPlayer in ipairs(Players:GetPlayers()) do
-                local leaderstats = {}
-                local leaderstatsFolder = serverPlayer:FindFirstChild("leaderstats")
-                for _, leaderstat in ipairs(leaderstatsFolder and leaderstatsFolder:GetChildren() or {}) do
-                    if leaderstat:IsA("ValueBase") then
-                        leaderstats[tostring(leaderstat.Name)] = tostring(leaderstat.Value)
+            local function buildDashboardServerPlayers()
+                local serverPlayers = {}
+                for _, serverPlayer in ipairs(Players:GetPlayers()) do
+                    local leaderstats = {}
+                    local leaderstatsFolder = serverPlayer:FindFirstChild("leaderstats")
+                    for _, leaderstat in ipairs(leaderstatsFolder and leaderstatsFolder:GetChildren() or {}) do
+                        if leaderstat:IsA("ValueBase") then
+                            leaderstats[tostring(leaderstat.Name)] = tostring(leaderstat.Value)
+                        end
+                    end
+                    table.insert(serverPlayers, {
+                        userId = tostring(serverPlayer.UserId),
+                        username = serverPlayer.Name,
+                        displayName = serverPlayer.DisplayName,
+                        leaderstats = leaderstats,
+                    })
+                end
+                return serverPlayers
+            end
+
+            local function getDashboardServerCapacity()
+                local serverCapacity = 10
+                pcall(function()
+                    serverCapacity = math.max(#Players:GetPlayers(), math.floor(tonumber(Players.MaxPlayers) or serverCapacity))
+                end)
+                return serverCapacity
+            end
+
+            local function getDashboardPetAssetId(pet, petInfo)
+                local images = petInfo and petInfo.Images
+                if type(images) ~= "table" then
+                    return nil
+                end
+                local image
+                local shiny = pet.Shiny == true or (type(pet.Pet) == "table" and pet.Pet.Shiny == true)
+                local mythic = pet.Mythic == true or (type(pet.Pet) == "table" and pet.Pet.Mythic == true)
+                if shiny and mythic then
+                    image = images[4] or images.MythicShiny or images["Shiny Mythic"] or images.ShinyMythic
+                elseif shiny then
+                    image = images[2] or images.Shiny
+                elseif mythic then
+                    image = images[3] or images.Mythic
+                else
+                    image = images[1] or images.Normal
+                end
+                return string.match(tostring(image or ""), "rbxassetid://(%d+)") or string.match(tostring(image or ""), "^(%d+)$")
+            end
+
+            local function buildDashboardInventory()
+                local inventory = {}
+                local inventoryStacks = {}
+                local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                for _, pet in ipairs(playerData and playerData.Pets or {}) do
+                    local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
+                    local petId = tostring(pet.Id or "")
+                    local petName = tostring(pet.Name or "Unknown Pet")
+                    local petRarity = tostring(petInfo and petInfo.Rarity or "")
+                    local imageAssetId = getDashboardPetAssetId(pet, petInfo)
+                    local stackKey = table.concat({petName, petRarity, tostring(imageAssetId or ""), tostring(pet.Shiny == true), tostring(pet.Mythic == true), tostring(pet.Super == true)}, "|")
+                    local stack = inventoryStacks[stackKey]
+                    if not stack then
+                        stack = {
+                            id = petId,
+                            ids = {},
+                            name = petName,
+                            amount = 0,
+                            rarity = petRarity,
+                            imageAssetId = imageAssetId,
+                            shiny = pet.Shiny == true,
+                            mythic = pet.Mythic == true,
+                            super = pet.Super == true,
+                        }
+                        inventoryStacks[stackKey] = stack
+                        table.insert(inventory, stack)
+                    end
+                    if petId ~= "" then
+                        table.insert(stack.ids, petId)
+                    end
+                    stack.amount = stack.amount + math.max(1, math.floor(tonumber(pet.Amount or pet.Count) or 1))
+                    if #inventory >= 1000 then
+                        break
                     end
                 end
-                table.insert(serverPlayers, {
-                    userId = tostring(serverPlayer.UserId),
-                    username = serverPlayer.Name,
-                    displayName = serverPlayer.DisplayName,
-                    leaderstats = leaderstats,
-                })
+                return inventory
             end
-            return serverPlayers
-        end
 
-        local function getDashboardServerCapacity()
-            local serverCapacity = 10
-            pcall(function()
-                serverCapacity = math.max(#Players:GetPlayers(), math.floor(tonumber(Players.MaxPlayers) or serverCapacity))
-            end)
-            return serverCapacity
-        end
-
-        local function getDashboardPetAssetId(pet, petInfo)
-            local images = petInfo and petInfo.Images
-            if type(images) ~= "table" then
-                return nil
-            end
-            local image
-            local shiny = pet.Shiny == true or (type(pet.Pet) == "table" and pet.Pet.Shiny == true)
-            local mythic = pet.Mythic == true or (type(pet.Pet) == "table" and pet.Pet.Mythic == true)
-            if shiny and mythic then
-                image = images[4] or images.MythicShiny or images["Shiny Mythic"] or images.ShinyMythic
-            elseif shiny then
-                image = images[2] or images.Shiny
-            elseif mythic then
-                image = images[3] or images.Mythic
-            else
-                image = images[1] or images.Normal
-            end
-            return string.match(tostring(image or ""), "rbxassetid://(%d+)") or string.match(tostring(image or ""), "^(%d+)$")
-        end
-
-        local function buildDashboardInventory()
-            local inventory = {}
-            local inventoryStacks = {}
-            local playerData = profileStore:IsReady() and profileStore:Get() or nil
-            for _, pet in ipairs(playerData and playerData.Pets or {}) do
-                local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
-                local petId = tostring(pet.Id or "")
-                local petName = tostring(pet.Name or "Unknown Pet")
-                local petRarity = tostring(petInfo and petInfo.Rarity or "")
-                local imageAssetId = getDashboardPetAssetId(pet, petInfo)
-                local stackKey = table.concat({petName, petRarity, tostring(imageAssetId or ""), tostring(pet.Shiny == true), tostring(pet.Mythic == true), tostring(pet.Super == true)}, "|")
-                local stack = inventoryStacks[stackKey]
-                if not stack then
-                    stack = {
-                        id = petId,
-                        ids = {},
-                        name = petName,
-                        amount = 0,
-                        rarity = petRarity,
-                        imageAssetId = imageAssetId,
-                        shiny = pet.Shiny == true,
-                        mythic = pet.Mythic == true,
-                        super = pet.Super == true,
-                    }
-                    inventoryStacks[stackKey] = stack
-                    table.insert(inventory, stack)
+            local function buildDashboardConfig()
+                local dashboardConfig = {}
+                for _, configKey in ipairs(dashboardConfigKeys) do
+                    if configKey ~= "webhookURL" then
+                        dashboardConfig[configKey] = Config[configKey]
+                    end
                 end
-                if petId ~= "" then
-                    table.insert(stack.ids, petId)
-                end
-                stack.amount = stack.amount + math.max(1, math.floor(tonumber(pet.Amount or pet.Count) or 1))
-                if #inventory >= 1000 then
-                    break
-                end
+                return dashboardConfig
             end
-            return inventory
-        end
 
-        local function buildDashboardConfig()
-            local dashboardConfig = {}
-            for _, configKey in ipairs(dashboardConfigKeys) do
-                dashboardConfig[configKey] = Config[configKey]
-            end
-            return dashboardConfig
-        end
-
-        task.spawn(function()
             while isCurrentRun() do
                 task.wait(Config.dashboardSyncEnabled and dashboardSyncDelay or 0.85)
                 dashboardEndpoint = tostring(Config.dashboardEndpoint or ""):match("^%s*(.-)%s*$") or ""
@@ -6291,12 +6328,15 @@ do
                                     end
                                 elseif dashboardCommand.type == "apply-config" and type(dashboardCommand.config) == "table" then
                                     commandSucceeded, commandError = pcall(function()
+                                        local appliedConfigCount = 0
                                         for configKey, configValue in pairs(dashboardCommand.config) do
                                             if dashboardConfigKeySet[configKey] and type(configValue) == type(defaultConfig[configKey]) then
                                                 Config[configKey] = configValue
+                                                appliedConfigCount = appliedConfigCount + 1
                                             end
                                         end
                                         saveConfig()
+                                        print("["..LocalPlayer.Name.."] Dashboard config applied = "..tostring(appliedConfigCount).." setting(s)")
                                     end)
                                     if commandSucceeded then
                                         commandError = nil
