@@ -53,6 +53,14 @@ activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
     return activeStates._1rzHubLiteRunToken == currentRunToken
 end
+do
+    local runtimePlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    if not runtimePlayerGui:FindFirstChild("ScreenGui") then
+        print("["..LocalPlayer.Name.."] Waiting for PlayerGui.ScreenGui before loading game modules...")
+    end
+    runtimePlayerGui:WaitForChild("ScreenGui")
+    print("["..LocalPlayer.Name.."] PlayerGui.ScreenGui ready.")
+end
 pcall(function()
     local openUi = CoreGui:FindFirstChild("OpenUI")
     if openUi then
@@ -102,6 +110,7 @@ local configFile = "1rzHubLiteConfig.json"
     autoBounty = false,
     spawnRift = false,
     autoLuckEgg = false,
+    autoHopLuckEgg = false,
     autoSpecialRift = false,
     potionType = "Speed",
     potionLevel = 1,
@@ -114,11 +123,18 @@ local configFile = "1rzHubLiteConfig.json"
     equippedTargetEnchantLevel = 0,
     equippedEnchantCurrency = "Auto (Secret = Crystals,Normal = Gems)",
     autoPlaytime = false,
+    autoClaimPrizes = false,
     autoClaimJuly4thRewards = false,
     autoEquipBestPets = false,
     autoUpgradeMastery = false,
     autoCollectCoins = false,
     autoUseFragments = false,
+    dashboardSyncEnabled = true,
+    dashboardSyncAutoEnabled = false,
+    dashboardEndpoint = "",
+    dashboardIngestToken = "",
+    dashboardBestHatchName = "",
+    dashboardBestHatchChance = 0,
     autoCollectCarnivalCoins = false,
     autoCarnivalChest = false,
     autoBuyShops = false,
@@ -343,6 +359,11 @@ local function refreshChunkerAroundPlayer()
 end
 
 Config = loadConfig()
+if Config.dashboardSyncAutoEnabled ~= true then
+    Config.dashboardSyncEnabled = true
+    Config.dashboardSyncAutoEnabled = true
+    saveConfig()
+end
 Config.chunkerRenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRenderDistance) or 4))
 _G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
 
@@ -3401,6 +3422,7 @@ activeStates.BGSI_Lite_LuckEggActive = false
 activeStates.BGSI_Lite_SpecialRiftActive = false
 task.spawn(function()
     local luckEggCooldown = 0
+    local luckEggReadinessLogAt = 0
     while true do
         task.wait(Config.autoLuckEgg and 0.05 or 0.85)
         if Config.autoLuckEgg ~= true then
@@ -3411,6 +3433,7 @@ task.spawn(function()
         end
         local summonedEgg = workspace:FindFirstChild("SummonedEgg")
             local scriptStateTL = summonedEgg and summonedEgg:FindFirstChild("EggPlatformSpawn")
+        local luckEggName = activeStates.BGSI_Lite_FindLuckEggName and activeStates.BGSI_Lite_FindLuckEggName() or "4x Luck Ultra Carnival Egg"
             if not scriptStateTL then
             if activeStates.BGSI_Lite_LuckEggActive then
                 activeStates.BGSI_Lite_LuckEggActive = false
@@ -3426,13 +3449,24 @@ task.spawn(function()
             task.wait(0.2)
             continue
         end
-        activeStates.BGSI_Lite_LuckEggActive = true
+        local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        local screenGui = playerGui and playerGui:FindFirstChild("ScreenGui")
+        local playerDataReady = profileStore and type(profileStore.IsReady) == "function" and profileStore:IsReady()
         local scriptStateDA = LocalPlayer and LocalPlayer.Character
             local scriptStateFV = scriptStateDA and scriptStateDA:FindFirstChild("HumanoidRootPart")
-            if not scriptStateFV then
-            task.wait(0.2)
+            if not playerDataReady or not screenGui or not scriptStateFV then
+            activeStates.BGSI_Lite_LuckEggActive = false
+            if tick() - luckEggReadinessLogAt >= 5 then
+                print("["..LocalPlayer.Name.."] 4x egg found. Waiting for client readiness: LocalData="..tostring(playerDataReady)..", PlayerGui="..tostring(playerGui ~= nil)..", ScreenGui="..tostring(screenGui ~= nil)..", Character="..tostring(scriptStateFV ~= nil))
+                luckEggReadinessLogAt = tick()
+            end
+            task.wait(0.5)
             continue
         end
+        if not activeStates.BGSI_Lite_LuckEggActive then
+            print("["..LocalPlayer.Name.."] 4x egg client ready. Starting hatch: "..tostring(luckEggName))
+        end
+        activeStates.BGSI_Lite_LuckEggActive = true
         if tick() - luckEggCooldown >= 5 then
             local rebirthPetVariant = scriptStateTL:IsA("BasePart") and scriptStateTL or scriptStateTL:FindFirstChildWhichIsA("BasePart", true)
             if rebirthPetVariant then
@@ -3443,7 +3477,7 @@ task.spawn(function()
             end
         end
         pcall(function()
-            remoteEvent:FireServer("HatchEgg", "4x Luck 600M Egg", getMaxHatchAmount())
+            remoteEvent:FireServer("HatchEgg", luckEggName, getMaxHatchAmount())
         end)
     end
 end)
@@ -4883,38 +4917,226 @@ do
         "Shops",
         "Rift"
     }
-    local fragmentNames = {
-        "Green Fragment",
-        "Red Fragment",
-        "Blue Fragment",
-        "Yellow Fragment",
-        "Purple Fragment",
-        "Orange Fragment",
-        "Rainbow Fragment",
+    local prizesData, prizesUtil
+    local fragmentTypes = {
+        "Green",
+        "Blue",
+        "Purple",
+        "Rainbow",
     }
-    local function getFragmentNames()
-        local names, seenNames = {}, {}
-        local function addFragmentName(fragmentName)
-            if type(fragmentName) == "string" and fragmentName ~= "" and string.find(string.lower(fragmentName), "fragment", 1, true) and not seenNames[fragmentName] then
-                seenNames[fragmentName] = true
-                table.insert(names, fragmentName)
+    local maximumFragmentCount = 250
+    activeStates.BGSI_Lite_FindLuckEggName = function()
+        local now = tick()
+        if now - (activeStates.BGSI_Lite_LuckEggCacheTime or 0) < 1 then
+            return activeStates.BGSI_Lite_LuckEggName
+        end
+        local function matchLuckEggName(candidateName)
+            if type(candidateName) ~= "string" then
+                return nil
             end
+            local lowerName = string.lower(candidateName)
+            local nameStart = string.find(lowerName, "4x luck", 1, true)
+            local nameEnd = nameStart and string.find(lowerName, "egg", nameStart, true)
+            return nameStart and nameEnd and candidateName:sub(nameStart, nameEnd + 2) or nil
         end
-        for _, fragmentName in ipairs(fragmentNames) do
-            addFragmentName(fragmentName)
-        end
-        for _, dataTable in ipairs({
-            giftData,
-            potionData,
-        }) do
-            if type(dataTable) == "table" then
-                for itemName in pairs(dataTable) do
-                    addFragmentName(itemName)
+        local summonedEgg = workspace:FindFirstChild("SummonedEgg")
+        if summonedEgg then
+            local eggInstances = summonedEgg:GetDescendants()
+            table.insert(eggInstances, 1, summonedEgg)
+            for _, eggInstance in ipairs(eggInstances) do
+                local eggName = matchLuckEggName(eggInstance.Name)
+                if not eggName and eggInstance:IsA("StringValue") then
+                    eggName = matchLuckEggName(eggInstance.Value)
+                elseif not eggName and (eggInstance:IsA("TextLabel") or eggInstance:IsA("TextButton") or eggInstance:IsA("TextBox")) then
+                    eggName = matchLuckEggName(eggInstance.Text)
+                end
+                if not eggName then
+                    for _, attributeValue in pairs(eggInstance:GetAttributes()) do
+                        eggName = matchLuckEggName(attributeValue)
+                        if eggName then
+                            break
+                        end
+                    end
+                end
+                if eggName then
+                    activeStates.BGSI_Lite_LuckEggName = eggName
+                    activeStates.BGSI_Lite_LuckEggCacheTime = now
+                    return eggName
                 end
             end
         end
-        table.sort(names)
-        return names
+        for _, eggName in ipairs(safeGetChildren(true)) do
+            local matchingEggName = matchLuckEggName(eggName)
+            if matchingEggName then
+                activeStates.BGSI_Lite_LuckEggName = matchingEggName
+                activeStates.BGSI_Lite_LuckEggCacheTime = now
+                return matchingEggName
+            end
+        end
+        activeStates.BGSI_Lite_LuckEggName = nil
+        activeStates.BGSI_Lite_LuckEggCacheTime = now
+        return nil
+    end
+    local luckEggServerHistoryFile = "1rzHubLiteLuckEggServers.json"
+    local luckEggServerHistory = {}
+
+    pcall(function()
+        if isfile and isfile(luckEggServerHistoryFile) then
+            local savedHistory = HttpService:JSONDecode(readfile(luckEggServerHistoryFile))
+            if type(savedHistory) == "table" and tostring(savedHistory.PlaceId or "") == tostring(game.PlaceId) and type(savedHistory.Servers) == "table" then
+                for savedJobId, rejectedAt in pairs(savedHistory.Servers) do
+                    local rejectedTimestamp = tonumber(rejectedAt)
+                    if type(savedJobId) == "string" and savedJobId ~= "" and rejectedTimestamp then
+                        luckEggServerHistory[savedJobId] = rejectedTimestamp
+                    end
+                end
+            end
+        end
+    end)
+
+    local function saveLuckEggServerHistory()
+        if not writefile then
+            return
+        end
+        pcall(function()
+            writefile(luckEggServerHistoryFile, HttpService:JSONEncode({
+                PlaceId = tostring(game.PlaceId),
+                Servers = luckEggServerHistory,
+                UpdatedAt = os.time(),
+            }))
+        end)
+    end
+
+    local function rejectLuckEggServer(jobId)
+        jobId = tostring(jobId or "")
+        if jobId == "" or luckEggServerHistory[jobId] then
+            return
+        end
+        luckEggServerHistory[jobId] = os.time()
+        saveLuckEggServerHistory()
+        print("["..LocalPlayer.Name.."] Saved no-egg JobId = "..jobId)
+    end
+
+    local function fetchLuckEggServerPage(cursor)
+        local serverURL = "https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
+        if type(cursor) == "string" and cursor ~= "" then
+            serverURL = serverURL.."&cursor="..HttpService:UrlEncode(cursor)
+        end
+        local requestOk, responseBody = pcall(function()
+            return game:HttpGet(serverURL)
+        end)
+        if not requestOk or type(responseBody) ~= "string" or responseBody == "" then
+            local requestFunction = request or http_request or (type(syn) == "table" and rawget(syn, "request")) or rawget(activeStates, "http_request")
+            if type(requestFunction) ~= "function" then
+                local httpTable = rawget(activeStates, "http")
+                requestFunction = type(httpTable) == "table" and rawget(httpTable, "request") or nil
+            end
+            if type(requestFunction) == "function" then
+                local executorOk, executorResponse = pcall(requestFunction, {
+                    Url = serverURL,
+                    Method = "GET",
+                    Headers = {
+                        ["Accept"] = "application/json",
+                    },
+                })
+                local statusCode = executorOk and type(executorResponse) == "table" and tonumber(executorResponse.StatusCode or executorResponse.Status) or nil
+                if executorOk and type(executorResponse) == "table" and statusCode and statusCode >= 200 and statusCode < 300 then
+                    responseBody = executorResponse.Body
+                    requestOk = type(responseBody) == "string" and responseBody ~= ""
+                end
+            end
+        end
+        if not requestOk or type(responseBody) ~= "string" or responseBody == "" then
+            return nil, "request failed"
+        end
+        local decodeOk, serverPage = pcall(HttpService.JSONDecode, HttpService, responseBody)
+        if not decodeOk or type(serverPage) ~= "table" then
+            return nil, "invalid response"
+        end
+        return serverPage
+    end
+
+    local function getUnvisitedLuckEggServers()
+        local serverIds = {}
+        local cursor
+        local pageCount = 0
+        local lastError
+        local seenCursors = {}
+        repeat
+            pageCount = pageCount + 1
+            local serverPage, pageError = fetchLuckEggServerPage(cursor)
+            if not serverPage then
+                lastError = pageError
+                break
+            end
+            for _, serverInfo in ipairs(serverPage.data or {}) do
+                local serverId = type(serverInfo) == "table" and tostring(serverInfo.id or "") or ""
+                local playing = type(serverInfo) == "table" and tonumber(serverInfo.playing) or 0
+                local maximumPlayers = type(serverInfo) == "table" and tonumber(serverInfo.maxPlayers) or 0
+                if serverId ~= "" and serverId ~= game.JobId and not luckEggServerHistory[serverId] and playing < maximumPlayers then
+                    table.insert(serverIds, serverId)
+                end
+            end
+            local nextCursor = serverPage.nextPageCursor
+            if type(nextCursor) == "string" and nextCursor ~= "" and not seenCursors[nextCursor] then
+                seenCursors[nextCursor] = true
+                cursor = nextCursor
+            else
+                cursor = nil
+            end
+        until cursor == nil or pageCount >= 100
+        return serverIds, pageCount, lastError
+    end
+
+    activeStates.BGSI_Lite_HopForLuckEgg = function()
+        if activeStates.BGSI_Lite_LuckEggHopInProgress then
+            return
+        end
+        activeStates.BGSI_Lite_LuckEggHopInProgress = true
+        rejectLuckEggServer(game.JobId)
+        print("["..LocalPlayer.Name.."] No matching 4x egg found. Searching for another server...")
+        if tostring(game.PrivateServerId or "") ~= "" then
+            print("["..LocalPlayer.Name.."] Current server is private. Public-server-only hop is active.")
+        end
+        local serverIds, scannedPages, serverListError = getUnvisitedLuckEggServers()
+        local rejectedCount = 0
+        for _ in pairs(luckEggServerHistory) do
+            rejectedCount = rejectedCount + 1
+        end
+        if #serverIds == 0 and not serverListError and rejectedCount > 0 then
+            print("["..LocalPlayer.Name.."] All known public servers were rejected. Clearing "..tostring(rejectedCount).." saved JobIds and rechecking every server.")
+            for rejectedJobId in pairs(luckEggServerHistory) do
+                luckEggServerHistory[rejectedJobId] = nil
+            end
+            saveLuckEggServerHistory()
+            serverIds, scannedPages, serverListError = getUnvisitedLuckEggServers()
+            rejectedCount = 0
+        end
+        task.delay(10, function()
+            if isCurrentRun() then
+                activeStates.BGSI_Lite_LuckEggHopInProgress = false
+            end
+        end)
+        if # serverIds > 0 then
+            local serverId = serverIds[math.random(1, # serverIds)]
+            activeStates.BGSI_Lite_LuckEggHopTarget = serverId
+            print("["..LocalPlayer.Name.."] Server scan pages = "..tostring(scannedPages)..", unvisited servers = "..tostring(#serverIds))
+            print("["..LocalPlayer.Name.."] Server hop target JobId = "..serverId)
+            local teleportOk, teleportError = pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+            end)
+            if not teleportOk then
+                print("["..LocalPlayer.Name.."] Server hop failed = "..tostring(teleportError))
+                activeStates.BGSI_Lite_LuckEggHopInProgress = false
+            end
+        else
+            if serverListError then
+                print("["..LocalPlayer.Name.."] Server list unavailable ("..tostring(serverListError).."). Staying here and retrying; same-server fallback is disabled.")
+            else
+                print("["..LocalPlayer.Name.."] No unvisited public servers found after "..tostring(scannedPages).." pages. Rejected JobIds = "..tostring(rejectedCount)..". Waiting for a new server.")
+            end
+            activeStates.BGSI_Lite_LuckEggHopInProgress = false
+        end
     end
     local function claimJuly4thRewards()
         pcall(function()
@@ -4992,16 +5214,33 @@ do
         end
         return math.max(0, math.floor(highestAmount))
     end
-    local function useFragment(fragmentName, amount)
-        amount = math.max(1, math.floor(tonumber(amount) or 1))
+    local function claimAvailablePrizes()
+        if not prizesData or not prizesUtil then
+            pcall(function()
+                prizesData = require(ReplicatedStorage.Shared.Data.Prizes)
+                prizesUtil = require(ReplicatedStorage.Shared.Utils.PrizesUtil)
+            end)
+        end
+        local playerData = profileStore:IsReady() and profileStore:Get() or nil
+        local claimedPrizes = playerData and playerData.ClaimedPrizes
+        local prizes = prizesData and prizesData.data
+        if type(playerData) ~= "table" or type(claimedPrizes) ~= "table" or type(prizes) ~= "table" or type(prizesUtil) ~= "table" then
+            return
+        end
+        for _, prize in ipairs(prizes) do
+            if not Config.autoClaimPrizes then
+                break
+            end
+            local progress = prizesUtil:GetProgress(playerData, prize.Type)
+            if claimedPrizes[prize.Key] == nil and progress >= prize.Requirement then
+                remoteEvent:FireServer("ClaimPrize", prize.Key)
+                task.wait(0.05)
+            end
+        end
+    end
+    local function useFragment(fragmentType)
         pcall(function()
-            remoteEvent:FireServer("UseGift", fragmentName, amount)
-        end)
-        pcall(function()
-            remoteEvent:FireServer("UsePowerup", fragmentName, amount)
-        end)
-        pcall(function()
-            remoteEvent:FireServer("UseItem", fragmentName, amount)
+            remoteEvent:FireServer("UseFragment", fragmentType)
         end)
     end
     gameTab:AddSection("Thangs")
@@ -5010,6 +5249,13 @@ do
         Default = Config.autoPlaytime,
         Callback = function(scriptStateFS)
             Config.autoPlaytime = scriptStateFS;saveConfig()
+        end,
+    })
+    gameTab:AddToggle("AutoClaimPrizes", {
+        Title = "Auto Claim Prizes",
+        Default = Config.autoClaimPrizes,
+        Callback = function(isEnabled)
+            Config.autoClaimPrizes = isEnabled;saveConfig()
         end,
     })
     gameTab:AddToggle("AutoClaimJuly4thRewards", {
@@ -5073,6 +5319,23 @@ do
         Default = Config.autoUseFragments,
         Callback = function(isEnabled)
             Config.autoUseFragments = isEnabled;saveConfig()
+        end,
+    })
+    gameTab:AddSection("4x Egg Server Hop")
+    gameTab:AddToggle("AutoHopLuckEgg", {
+        Title = "Server Hop for 4x Egg (AA)",
+        Default = Config.autoHopLuckEgg,
+        Callback = function(isEnabled)
+            Config.autoHopLuckEgg = isEnabled;saveConfig()
+        end,
+    })
+    gameTab:AddSection("Account Dashboard")
+    gameTab:AddToggle("DashboardSyncEnabled", {
+        Title = "Connect to Account Dashboard",
+        Description = "Sends this account's live game status and pet inventory to your private Account Grid.",
+        Default = Config.dashboardSyncEnabled,
+        Callback = function(isEnabled)
+            Config.dashboardSyncEnabled = isEnabled;saveConfig()
         end,
     })
 
@@ -5500,6 +5763,562 @@ do
         end
     end)
     task.spawn(function()
+        while true do
+            task.wait(Config.autoClaimPrizes and 2 or 0.85)
+            if Config.autoClaimPrizes then
+                pcall(claimAvailablePrizes)
+            end
+        end
+    end)
+    task.spawn(function()
+        local searchStartedAt = tick()
+        local lastDetectedEggName
+        while true do
+            task.wait(Config.autoHopLuckEgg and 2 or 0.85)
+            if not Config.autoHopLuckEgg then
+                searchStartedAt = tick()
+                continue
+            end
+            if activeStates.BGSI_Lite_DashboardJoinTarget then
+                searchStartedAt = tick()
+                continue
+            end
+            local detectedEggName = activeStates.BGSI_Lite_FindLuckEggName()
+            if detectedEggName then
+                if detectedEggName ~= lastDetectedEggName then
+                    print("["..LocalPlayer.Name.."] Found "..detectedEggName..". Staying in this server.")
+                end
+                lastDetectedEggName = detectedEggName
+                searchStartedAt = tick()
+            elseif tick() - searchStartedAt >= 12 then
+                lastDetectedEggName = nil
+                activeStates.BGSI_Lite_HopForLuckEgg()
+                searchStartedAt = tick()
+            end
+        end
+    end)
+    task.spawn(function()
+        local previousHatchCount
+        local previousSampleTime = tick()
+        while true do
+            task.wait(5)
+            if Config.autoHopLuckEgg or Config.autoLuckEgg or Config.dashboardSyncEnabled then
+                local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                local currentHatchCount = playerData and playerData.Stats and tonumber(playerData.Stats.Hatches) or 0
+                local currentSampleTime = tick()
+                local elapsedTime = math.max(currentSampleTime - previousSampleTime, 0.001)
+                local hatchRate = previousHatchCount and math.max(0, math.floor(((currentHatchCount - previousHatchCount) / elapsedTime) * 60 + 0.5)) or 0
+                local formattedHatchRate = tostring(hatchRate)
+                while true do
+                    local formattedValue, replacementCount = formattedHatchRate:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+                    formattedHatchRate = formattedValue
+                    if replacementCount == 0 then
+                        break
+                    end
+                end
+                local currentEggName
+                if activeStates.BGSI_Lite_LuckEggActive == true then
+                    currentEggName = activeStates.BGSI_Lite_LuckEggName or activeStates.BGSI_Lite_FindLuckEggName() or "4x Luck Ultra Carnival Egg"
+                elseif Config.autoRiftEgg == true then
+                    currentEggName = tostring(Config.selectedRiftEgg or "")
+                end
+                if (not currentEggName or currentEggName == "") and Config.autoHatch == true then
+                    currentEggName = tostring(Config.selectedEgg or "")
+                end
+                if not currentEggName or currentEggName == "" then
+                    currentEggName = "None"
+                end
+                local isHatching = currentEggName ~= "None" and (activeStates.BGSI_Lite_LuckEggActive == true or Config.autoRiftEgg == true or Config.autoHatch == true)
+                activeStates.BGSI_Lite_CurrentEggName = currentEggName
+                activeStates.BGSI_Lite_IsHatching = isHatching
+                activeStates.BGSI_Lite_CurrentHatchRate = hatchRate
+                local logPrefix = "["..LocalPlayer.Name.."] "
+                print(logPrefix.."Egg = "..currentEggName)
+                print(logPrefix.."isHatching = "..tostring(isHatching))
+                print(logPrefix.."Hatchrate = "..formattedHatchRate.."/m")
+                previousHatchCount = currentHatchCount
+                previousSampleTime = currentSampleTime
+            else
+                activeStates.BGSI_Lite_CurrentEggName = "None"
+                activeStates.BGSI_Lite_IsHatching = false
+                activeStates.BGSI_Lite_CurrentHatchRate = 0
+                previousHatchCount = nil
+                previousSampleTime = tick()
+            end
+        end
+    end)
+    do
+        local dashboardEndpoint = tostring(Config.dashboardEndpoint or "")
+        local dashboardIngestToken = tostring(Config.dashboardIngestToken or "")
+        local dashboardInventoryEnabled = true
+        local dashboardStatsUtil = safeRequireTable(function()
+            return require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+        end)
+        local dashboardWorldUtil = safeRequireTable(function()
+            return require(ReplicatedStorage.Shared.Utils.WorldUtil)
+        end)
+        local dashboardStartedAt = tick()
+        activeStates.BGSI_Lite_DashboardBestHatchName = ""
+        activeStates.BGSI_Lite_DashboardBestHatchChance = 0
+        activeStates.BGSI_Lite_DashboardHandledCommands = {}
+        activeStates.BGSI_Lite_DashboardPendingHatches = {}
+        local dashboardRequest = request or http_request or (type(syn) == "table" and rawget(syn, "request")) or rawget(activeStates, "http_request")
+        if type(dashboardRequest) ~= "function" then
+            local httpTable = rawget(activeStates, "http")
+            dashboardRequest = type(httpTable) == "table" and rawget(httpTable, "request") or nil
+        end
+        local lastInventorySync = 0
+        local lastDashboardState
+        local dashboardConnected
+        local dashboardFailureLogAt = 0
+        local pendingDashboardCommandResults = {}
+        local lastInventorySignature
+        local dashboardConfigKeys = {
+            "dashboardEndpoint",
+            "autoHatch",
+            "selectedEgg",
+            "autoRiftEgg",
+            "selectedRiftEgg",
+            "noHatchAnim",
+            "autoLuckEgg",
+            "autoHopLuckEgg",
+            "autoBubble",
+            "autoSell",
+            "autoClaimPrizes",
+            "autoUseFragments",
+            "autoEquipBestPets",
+            "autoEnchant",
+            "autoPlaytime",
+            "disableRendering",
+            "renderDistance",
+            "chunkerRenderDistance",
+        }
+        local dashboardConfigKeySet = {}
+        for _, configKey in ipairs(dashboardConfigKeys) do
+            dashboardConfigKeySet[configKey] = true
+        end
+
+        local function getDashboardLuckPercent()
+            local luckMultiplier = 1
+            pcall(function()
+                local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                local playerWorld = dashboardWorldUtil and dashboardWorldUtil:GetPlayerWorld(LocalPlayer) or "The Overworld"
+                if playerData and dashboardStatsUtil and type(dashboardStatsUtil.GetLuckMultiplier) == "function" then
+                    luckMultiplier = tonumber(dashboardStatsUtil:GetLuckMultiplier(LocalPlayer, playerData, playerWorld, true)) or 1
+                end
+            end)
+            return math.max(0, (luckMultiplier - 1) * 100)
+        end
+
+        local function buildDashboardServerPlayers()
+            local serverPlayers = {}
+            for _, serverPlayer in ipairs(Players:GetPlayers()) do
+                local leaderstats = {}
+                local leaderstatsFolder = serverPlayer:FindFirstChild("leaderstats")
+                for _, leaderstat in ipairs(leaderstatsFolder and leaderstatsFolder:GetChildren() or {}) do
+                    if leaderstat:IsA("ValueBase") then
+                        leaderstats[tostring(leaderstat.Name)] = tostring(leaderstat.Value)
+                    end
+                end
+                table.insert(serverPlayers, {
+                    userId = tostring(serverPlayer.UserId),
+                    username = serverPlayer.Name,
+                    displayName = serverPlayer.DisplayName,
+                    leaderstats = leaderstats,
+                })
+            end
+            return serverPlayers
+        end
+
+        local function getDashboardServerCapacity()
+            local serverCapacity = 10
+            pcall(function()
+                serverCapacity = math.max(#Players:GetPlayers(), math.floor(tonumber(Players.MaxPlayers) or serverCapacity))
+            end)
+            return serverCapacity
+        end
+
+        local function getDashboardPetAssetId(pet, petInfo)
+            local images = petInfo and petInfo.Images
+            if type(images) ~= "table" then
+                return nil
+            end
+            local image
+            if pet.Shiny == true and pet.Mythic == true then
+                image = images[4] or images.MythicShiny or images["Shiny Mythic"] or images.ShinyMythic
+            elseif pet.Shiny == true then
+                image = images[2] or images.Shiny
+            elseif pet.Mythic == true then
+                image = images[3] or images.Mythic
+            else
+                image = images[1] or images.Normal
+            end
+            return string.match(tostring(image or ""), "rbxassetid://(%d+)") or string.match(tostring(image or ""), "^(%d+)$")
+        end
+
+        local function buildDashboardInventory()
+            local inventory = {}
+            local inventoryStacks = {}
+            local playerData = profileStore:IsReady() and profileStore:Get() or nil
+            for _, pet in ipairs(playerData and playerData.Pets or {}) do
+                local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
+                local petId = tostring(pet.Id or "")
+                local petName = tostring(pet.Name or "Unknown Pet")
+                local petRarity = tostring(petInfo and petInfo.Rarity or "")
+                local imageAssetId = getDashboardPetAssetId(pet, petInfo)
+                local stackKey = table.concat({petName, petRarity, tostring(imageAssetId or ""), tostring(pet.Shiny == true), tostring(pet.Mythic == true), tostring(pet.Super == true)}, "|")
+                local stack = inventoryStacks[stackKey]
+                if not stack then
+                    stack = {
+                        id = petId,
+                        ids = {},
+                        name = petName,
+                        amount = 0,
+                        rarity = petRarity,
+                        imageAssetId = imageAssetId,
+                        shiny = pet.Shiny == true,
+                        mythic = pet.Mythic == true,
+                        super = pet.Super == true,
+                    }
+                    inventoryStacks[stackKey] = stack
+                    table.insert(inventory, stack)
+                end
+                if petId ~= "" then
+                    table.insert(stack.ids, petId)
+                end
+                stack.amount = stack.amount + math.max(1, math.floor(tonumber(pet.Amount or pet.Count) or 1))
+                if #inventory >= 1000 then
+                    break
+                end
+            end
+            return inventory
+        end
+
+        local function buildDashboardConfig()
+            local dashboardConfig = {}
+            for _, configKey in ipairs(dashboardConfigKeys) do
+                dashboardConfig[configKey] = Config[configKey]
+            end
+            return dashboardConfig
+        end
+
+        task.spawn(function()
+            while isCurrentRun() do
+                task.wait(Config.dashboardSyncEnabled and 2 or 0.85)
+                if Config.dashboardSyncEnabled and dashboardEndpoint ~= "" and dashboardIngestToken ~= "" then
+                    if type(dashboardRequest) ~= "function" then
+                        if dashboardConnected ~= false then
+                            print("["..LocalPlayer.Name.."] Account Dashboard request function unavailable.")
+                        end
+                        dashboardConnected = false
+                        continue
+                    end
+
+                    local currentEggName = tostring(activeStates.BGSI_Lite_CurrentEggName or "None")
+                    local isHatching = activeStates.BGSI_Lite_IsHatching == true
+                    local hatchRate = math.max(0, math.floor(tonumber(activeStates.BGSI_Lite_CurrentHatchRate) or 0))
+                    local currentState = currentEggName.."|"..tostring(isHatching)
+                    local currentInventory
+                    local inventorySignature
+                    local includeInventory = false
+                    if dashboardInventoryEnabled then
+                        currentInventory = buildDashboardInventory()
+                        inventorySignature = HttpService:JSONEncode(currentInventory)
+                        includeInventory = inventorySignature ~= lastInventorySignature or tick() - lastInventorySync >= 120
+                    end
+                    local pendingDashboardHatches = activeStates.BGSI_Lite_DashboardPendingHatches
+                    local sentDashboardHatchCount = math.min(#pendingDashboardHatches, 100)
+                    local payload = {
+                        userId = tostring(LocalPlayer.UserId),
+                        username = LocalPlayer.Name,
+                        displayName = LocalPlayer.DisplayName,
+                        status = "in-game",
+                        gameName = tostring(game.Name),
+                        placeId = tostring(game.PlaceId),
+                        jobId = tostring(game.JobId),
+                        isHatching = isHatching,
+                        hatchRate = hatchRate,
+                        luckPercent = getDashboardLuckPercent(),
+                        currentEgg = currentEggName ~= "None" and currentEggName or "",
+                        bestHatchName = tostring(activeStates.BGSI_Lite_DashboardBestHatchName or ""),
+                        bestHatchChance = math.max(0, tonumber(activeStates.BGSI_Lite_DashboardBestHatchChance) or 0),
+                        uptimeSeconds = math.max(0, math.floor(tick() - dashboardStartedAt)),
+                        serverCapacity = getDashboardServerCapacity(),
+                        luckEggName = activeStates.BGSI_Lite_FindLuckEggName and activeStates.BGSI_Lite_FindLuckEggName() or nil,
+                        serverPlayers = buildDashboardServerPlayers(),
+                        config = buildDashboardConfig(),
+                    }
+                    if sentDashboardHatchCount > 0 then
+                        payload.hatches = {}
+                        for hatchIndex = 1, sentDashboardHatchCount do
+                            table.insert(payload.hatches, pendingDashboardHatches[hatchIndex])
+                        end
+                    end
+                    if #pendingDashboardCommandResults > 0 then
+                        payload.commandResults = pendingDashboardCommandResults
+                    end
+                    if includeInventory then
+                        payload.inventory = currentInventory
+                        lastInventorySync = tick()
+                        lastInventorySignature = inventorySignature
+                    end
+                    if currentState ~= lastDashboardState then
+                        payload.log = isHatching and ("Hatching "..currentEggName.." at "..tostring(hatchRate).."/m") or "Hatching idle"
+                        lastDashboardState = currentState
+                    end
+
+                    local requestOk, response = pcall(dashboardRequest, {
+                        Url = dashboardEndpoint,
+                        Method = "POST",
+                        Headers = {
+                            ["Content-Type"] = "application/json",
+                            ["Authorization"] = "Bearer "..dashboardIngestToken,
+                        },
+                        Body = HttpService:JSONEncode(payload),
+                    })
+                    local statusCode = requestOk and type(response) == "table" and tonumber(response.StatusCode or response.Status or response.status_code) or nil
+                    local responseBody = requestOk and type(response) == "table" and tostring(response.Body or response.body or "") or ""
+                    local syncSucceeded = requestOk and ((statusCode and statusCode >= 200 and statusCode < 300) or (not statusCode and string.find(responseBody, '"ok":true', 1, true)))
+                    if syncSucceeded then
+                        if not dashboardConnected then
+                            print("["..LocalPlayer.Name.."] Account Dashboard connected.")
+                        end
+                        dashboardConnected = true
+                        pendingDashboardCommandResults = {}
+                        for _ = 1, sentDashboardHatchCount do
+                            table.remove(pendingDashboardHatches, 1)
+                        end
+                        local responsePayload
+                        pcall(function()
+                            responsePayload = HttpService:JSONDecode(responseBody)
+                        end)
+                        for _, dashboardCommand in ipairs(type(responsePayload) == "table" and responsePayload.commands or {}) do
+                            local commandId = tonumber(dashboardCommand.id)
+                            if commandId and not activeStates.BGSI_Lite_DashboardHandledCommands[commandId] then
+                                activeStates.BGSI_Lite_DashboardHandledCommands[commandId] = true
+                                local commandSucceeded = false
+                                local commandError = "Unsupported command"
+                                local commandDeferred = false
+                                if dashboardCommand.type == "delete-pet" and tostring(dashboardCommand.petId or "") ~= "" then
+                                    local commandPetIds = {}
+                                    for _, commandPetId in ipairs(type(dashboardCommand.petIds) == "table" and dashboardCommand.petIds or {dashboardCommand.petId}) do
+                                        commandPetId = tostring(commandPetId or "")
+                                        if commandPetId ~= "" then
+                                            table.insert(commandPetIds, commandPetId)
+                                        end
+                                    end
+                                    local commandQuantity = math.max(1, math.floor(tonumber(dashboardCommand.quantity) or #commandPetIds))
+                                    commandSucceeded, commandError = pcall(function()
+                                        local commandPetIdSet = {}
+                                        for _, commandPetId in ipairs(commandPetIds) do
+                                            commandPetIdSet[commandPetId] = true
+                                        end
+                                        local function getCommandPetAmount()
+                                            local amount = 0
+                                            local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                                            for _, inventoryPet in ipairs(playerData and playerData.Pets or {}) do
+                                                if commandPetIdSet[tostring(inventoryPet.Id or "")] then
+                                                    amount = amount + math.max(1, math.floor(tonumber(inventoryPet.Amount or inventoryPet.Count) or 1))
+                                                end
+                                            end
+                                            return amount
+                                        end
+                                        local function getCommandPet(petId)
+                                            local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                                            for _, inventoryPet in ipairs(playerData and playerData.Pets or {}) do
+                                                if tostring(inventoryPet.Id or "") == petId then
+                                                    return inventoryPet, playerData
+                                                end
+                                            end
+                                            return nil, playerData
+                                        end
+                                        local function isCommandPetEquipped(playerData, petId)
+                                            local equippedTeam = playerData and playerData.Teams and playerData.Teams[playerData.TeamEquipped]
+                                            for _, equippedPetId in ipairs(equippedTeam and equippedTeam.Pets or {}) do
+                                                if tostring(equippedPetId) == petId then
+                                                    return true
+                                                end
+                                            end
+                                            return false
+                                        end
+                                        local previousAmount = getCommandPetAmount()
+                                        if previousAmount <= 0 then
+                                            error("The selected pet is no longer in the inventory")
+                                        end
+                                        local targetAmount = math.min(commandQuantity, previousAmount)
+                                        local deletedAmount = 0
+                                        while deletedAmount < targetAmount do
+                                            local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                                            local nextPetId
+                                            for _, inventoryPet in ipairs(playerData and playerData.Pets or {}) do
+                                                local inventoryPetId = tostring(inventoryPet.Id or "")
+                                                if commandPetIdSet[inventoryPetId] then
+                                                    nextPetId = inventoryPetId
+                                                    break
+                                                end
+                                            end
+                                            if not nextPetId then
+                                                error("The selected pet stack changed before deletion finished")
+                                            end
+
+                                            local selectedPet, playerData = getCommandPet(nextPetId)
+                                            if selectedPet and (selectedPet.Locked == true or selectedPet.IsLocked == true) then
+                                                error("Unlock pet "..nextPetId.." before deleting it")
+                                            end
+                                            if isCommandPetEquipped(playerData, nextPetId) then
+                                                remoteEvent:FireServer("UnequipPet", nextPetId)
+                                                local unequipDeadline = tick() + 5
+                                                repeat
+                                                    task.wait(0.1)
+                                                    local _, updatedPlayerData = getCommandPet(nextPetId)
+                                                    if not isCommandPetEquipped(updatedPlayerData, nextPetId) then
+                                                        break
+                                                    end
+                                                until tick() >= unequipDeadline
+                                                local _, updatedPlayerData = getCommandPet(nextPetId)
+                                                if isCommandPetEquipped(updatedPlayerData, nextPetId) then
+                                                    error("The game did not unequip pet "..nextPetId)
+                                                end
+                                            end
+
+                                            local amountBeforeDelete = getCommandPetAmount()
+                                            local amountAfterDelete = amountBeforeDelete
+                                            for deleteAttempt = 1, 3 do
+                                                remoteEvent:FireServer("DeletePet", nextPetId)
+                                                local deleteDeadline = tick() + 4
+                                                repeat
+                                                    task.wait(0.1)
+                                                    amountAfterDelete = getCommandPetAmount()
+                                                until amountAfterDelete < amountBeforeDelete or tick() >= deleteDeadline
+                                                if amountAfterDelete < amountBeforeDelete then
+                                                    break
+                                                end
+                                                if deleteAttempt < 3 then
+                                                    task.wait(0.5)
+                                                end
+                                            end
+
+                                            if amountAfterDelete >= amountBeforeDelete then
+                                                error("The game did not delete pet "..nextPetId)
+                                            end
+                                            deletedAmount = deletedAmount + amountBeforeDelete - amountAfterDelete
+                                        end
+                                    end)
+                                    if commandSucceeded then
+                                        commandError = nil
+                                        lastInventorySync = 0
+                                    end
+                                elseif dashboardCommand.type == "apply-config" and type(dashboardCommand.config) == "table" then
+                                    commandSucceeded, commandError = pcall(function()
+                                        for configKey, configValue in pairs(dashboardCommand.config) do
+                                            if dashboardConfigKeySet[configKey] and type(configValue) == type(defaultConfig[configKey]) then
+                                                Config[configKey] = configValue
+                                            end
+                                        end
+                                        saveConfig()
+                                    end)
+                                    if commandSucceeded then
+                                        commandError = nil
+                                    end
+                                elseif dashboardCommand.type == "rejoin" then
+                                    commandSucceeded = true
+                                    commandError = nil
+                                    local rejoinPlaceId = tonumber(dashboardCommand.placeId) or game.PlaceId
+                                    local rejoinJobId = tostring(dashboardCommand.jobId or game.JobId)
+                                    task.delay(7, function()
+                                        if isCurrentRun() then
+                                            TeleportService:TeleportToPlaceInstance(rejoinPlaceId, rejoinJobId, LocalPlayer)
+                                        end
+                                    end)
+                                elseif dashboardCommand.type == "join-server" then
+                                    local targetPlaceId = tonumber(dashboardCommand.placeId) or game.PlaceId
+                                    local targetJobId = tostring(dashboardCommand.jobId or "")
+                                    local currentLuckEggName = activeStates.BGSI_Lite_LuckEggName
+                                    if activeStates.BGSI_Lite_FindLuckEggName then
+                                        pcall(function()
+                                            currentLuckEggName = activeStates.BGSI_Lite_FindLuckEggName() or currentLuckEggName
+                                        end)
+                                    end
+                                    local alreadyAtLuckEgg = activeStates.BGSI_Lite_LuckEggActive == true
+                                        or(string.find(string.lower(tostring(currentLuckEggName or "")), "4x luck", 1, true) ~= nil)
+                                    if alreadyAtLuckEgg then
+                                        activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                                        commandSucceeded = true
+                                        commandError = nil
+                                        print("["..LocalPlayer.Name.."] Already at "..tostring(currentLuckEggName or "4x Luck Egg")..". Ignoring fleet move request.")
+                                    elseif targetJobId == "" then
+                                        commandError = "Missing target JobId"
+                                    elseif targetJobId == tostring(game.JobId) then
+                                        activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                                        commandSucceeded = true
+                                        commandError = nil
+                                        print("["..LocalPlayer.Name.."] Joined shared 4x egg server = "..targetJobId)
+                                    else
+                                        commandDeferred = true
+                                        activeStates.BGSI_Lite_DashboardJoinTarget = targetJobId
+                                        print("["..LocalPlayer.Name.."] Fleet 4x egg found = "..tostring(dashboardCommand.eggName or "4x Luck Egg"))
+                                        print("["..LocalPlayer.Name.."] Joining fleet server JobId = "..targetJobId)
+                                        local sourceJobId = tostring(game.JobId)
+                                        local joinAttemptFinished = false
+                                        task.delay(1, function()
+                                            if not isCurrentRun() then
+                                                return
+                                            end
+                                            local teleportOk, teleportError = pcall(function()
+                                                TeleportService:TeleportToPlaceInstance(targetPlaceId, targetJobId, LocalPlayer)
+                                            end)
+                                            if not teleportOk and not joinAttemptFinished then
+                                                joinAttemptFinished = true
+                                                activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                                                table.insert(pendingDashboardCommandResults, {
+                                                    id = commandId,
+                                                    success = false,
+                                                    error = tostring(teleportError),
+                                                })
+                                            end
+                                        end)
+                                        task.delay(15, function()
+                                            if isCurrentRun() and not joinAttemptFinished and tostring(game.JobId) == sourceJobId then
+                                                joinAttemptFinished = true
+                                                activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                                                table.insert(pendingDashboardCommandResults, {
+                                                    id = commandId,
+                                                    success = false,
+                                                    error = "Fleet server was full or teleport timed out",
+                                                })
+                                                print("["..LocalPlayer.Name.."] Fleet server join timed out. Continuing 4x egg search.")
+                                            end
+                                        end)
+                                    end
+                                end
+                                if not commandDeferred then
+                                    table.insert(pendingDashboardCommandResults, {
+                                        id = commandId,
+                                        success = commandSucceeded,
+                                        error = commandError and tostring(commandError) or nil,
+                                    })
+                                end
+                            end
+                        end
+                    else
+                        if tick() - dashboardFailureLogAt >= 10 then
+                            print("["..LocalPlayer.Name.."] Account Dashboard sync failed. Status = "..tostring(statusCode or response)..", Body = "..string.sub(responseBody, 1, 200))
+                            dashboardFailureLogAt = tick()
+                        end
+                        dashboardConnected = false
+                        if includeInventory then
+                            lastInventorySync = 0
+                            lastInventorySignature = nil
+                        end
+                    end
+                else
+                    dashboardConnected = nil
+                    lastDashboardState = nil
+                end
+            end
+        end)
+    end
+    task.spawn(function()
         local lastJuly4thClaimAt = 0
         while true do
             task.wait(Config.autoClaimJuly4thRewards and 5 or 0.85)
@@ -5594,14 +6413,20 @@ do
         while true do
             task.wait(Config.autoUseFragments and 5 or 0.85)
             if Config.autoUseFragments then
-                for _, fragmentName in ipairs(getFragmentNames()) do
+                local playerData = profileStore:IsReady() and profileStore:Get() or nil
+                local usedFragments = playerData and playerData.Fragments or {}
+                for _, fragmentType in ipairs(fragmentTypes) do
                     if not Config.autoUseFragments then
                         break
                     end
-                    local fragmentAmount = getInventoryItemAmount(fragmentName)
-                    if fragmentAmount > 0 then
-                        useFragment(fragmentName, fragmentAmount)
-                        task.wait(0.2)
+                    local fragmentAmount = getInventoryItemAmount(fragmentType.." Fragment")
+                    local remainingFragmentCapacity = math.max(0, maximumFragmentCount - (tonumber(usedFragments[fragmentType]) or 0))
+                    for fragmentIndex = 1, math.min(fragmentAmount, remainingFragmentCapacity) do
+                        if not Config.autoUseFragments then
+                            break
+                        end
+                        useFragment(fragmentType)
+                        task.wait(0.05)
                     end
                 end
             end
@@ -5857,13 +6682,22 @@ activeStates.BGSI_Lite_GetWebhookPetEntryId = function(webhookPetEntry)
         "Id",
         "ID",
         "id",
+        "PetId",
+        "PetID",
+        "petId",
         "Guid",
         "GUID",
         "guid",
+        "PetGuid",
+        "PetGUID",
         "UUID",
         "uuid",
+        "PetUUID",
         "UID",
         "uid",
+        "UniqueId",
+        "UniqueID",
+        "Identifier",
     }) do
         local idValue = webhookPetEntry[idKey]
         if idValue ~= nil and tostring(idValue) ~= "" then
@@ -5874,12 +6708,26 @@ activeStates.BGSI_Lite_GetWebhookPetEntryId = function(webhookPetEntry)
         or activeStates.BGSI_Lite_GetWebhookPetEntryId(webhookPetEntry.Data)
         or activeStates.BGSI_Lite_GetWebhookPetEntryId(webhookPetEntry.Info)
 end
+activeStates.BGSI_Lite_NormalizeWebhookPetName = function(petName)
+    if type(petName) ~= "string" then
+        return ""
+    end
+    local normalizedName = string.lower(petName):gsub("^%s+", ""):gsub("%s+$", "")
+    local previousName
+    repeat
+        previousName = normalizedName
+        normalizedName = normalizedName:gsub("^shiny%s+", "")
+        normalizedName = normalizedName:gsub("^mythic%s+", "")
+        normalizedName = normalizedName:gsub("^xl%s+", "")
+    until normalizedName == previousName
+    return normalizedName:gsub("[%s_%-]+", "")
+end
 activeStates.BGSI_Lite_DoesStoredWebhookPetMatch = function(storedPet, petName, isShiny, isMythic, isXL)
     if type(storedPet) ~= "table" then
         return false
     end
     local storedName = storedPet.Name or storedPet.PetName or storedPet.Pet
-    if type(storedName) ~= "string" or storedName ~= petName then
+    if activeStates.BGSI_Lite_NormalizeWebhookPetName(storedName) ~= activeStates.BGSI_Lite_NormalizeWebhookPetName(petName) then
         return false
     end
     if isShiny ~= nil and (storedPet.Shiny == true or storedPet.IsShiny == true) ~= (isShiny == true) then
@@ -5893,7 +6741,7 @@ activeStates.BGSI_Lite_DoesStoredWebhookPetMatch = function(storedPet, petName, 
     end
     return true
 end
-activeStates.BGSI_Lite_FindStoredWebhookPet = function(webhookPetEntry, petName, isShiny, isMythic, isXL)
+activeStates.BGSI_Lite_FindStoredWebhookPet = function(webhookPetEntry, petName, isShiny, isMythic, isXL, excludedPetIds)
     local targetPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(webhookPetEntry)
     local ok, playerData = pcall(function()
         return profileStore:IsReady() and profileStore:Get() or nil
@@ -5903,20 +6751,57 @@ activeStates.BGSI_Lite_FindStoredWebhookPet = function(webhookPetEntry, petName,
         return nil
     end
     if targetPetId then
-        for _, storedPet in ipairs(petList) do
+        for storedPetKey, storedPet in pairs(petList) do
             if type(storedPet) == "table" then
                 local storedPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(storedPet)
                 if storedPetId == targetPetId then
-                    return storedPet
+                    return storedPet, storedPetKey
                 end
             end
         end
     end
     for petIndex = # petList, 1, - 1 do
         local storedPet = petList[petIndex]
-        if activeStates.BGSI_Lite_DoesStoredWebhookPetMatch(storedPet, petName, isShiny, isMythic, isXL) then
-            return storedPet
+        local storedPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(storedPet)
+        if(not excludedPetIds or not storedPetId or not excludedPetIds[storedPetId]) and activeStates.BGSI_Lite_DoesStoredWebhookPetMatch(storedPet, petName, isShiny, isMythic, isXL) then
+            return storedPet, petIndex
         end
+    end
+    for storedPetKey, storedPet in pairs(petList) do
+        if type(storedPetKey) ~= "number" then
+            local storedPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(storedPet)
+            if(not excludedPetIds or not storedPetId or not excludedPetIds[storedPetId]) and activeStates.BGSI_Lite_DoesStoredWebhookPetMatch(storedPet, petName, isShiny, isMythic, isXL) then
+                return storedPet, storedPetKey
+            end
+        end
+    end
+    return nil
+end
+activeStates.BGSI_Lite_GetResolvedWebhookPetId = function(webhookPetEntry, petName, isShiny, isMythic, isXL, excludedPetIds)
+    local webhookPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(webhookPetEntry)
+    if webhookPetId then
+        return webhookPetId
+    end
+    local cachedStoredPet = activeStates.BGSI_Lite_LastWebhookStoredPet
+    if activeStates.BGSI_Lite_DoesStoredWebhookPetMatch(cachedStoredPet, petName, isShiny, isMythic, isXL) then
+        local cachedPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(cachedStoredPet)
+        if cachedPetId and(not excludedPetIds or not excludedPetIds[cachedPetId]) then
+            return cachedPetId
+        end
+    end
+    for retryIndex = 1, 20 do
+        local storedPet, storedPetKey = activeStates.BGSI_Lite_FindStoredWebhookPet(webhookPetEntry, petName, isShiny, isMythic, isXL, excludedPetIds)
+        if storedPet then
+            activeStates.BGSI_Lite_LastWebhookStoredPet = storedPet
+            local storedPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(storedPet)
+            if storedPetId then
+                return storedPetId
+            end
+            if type(storedPetKey) == "string" and storedPetKey ~= "" then
+                return storedPetKey
+            end
+        end
+        task.wait(0.05)
     end
     return nil
 end
@@ -5942,6 +6827,9 @@ local function getWebhookSuperLegendaryEnchantText(webhookPetEntry, petName, isS
     if # enchantNames == 0 then
         for retryIndex = 1, 10 do
             local storedPet = activeStates.BGSI_Lite_FindStoredWebhookPet(webhookPetEntry, petName, isShiny, isMythic, isXL)
+            if storedPet then
+                activeStates.BGSI_Lite_LastWebhookStoredPet = storedPet
+            end
             addEnchantSource(storedPet)
             if # enchantNames > 0 then
                 break
@@ -5952,7 +6840,13 @@ local function getWebhookSuperLegendaryEnchantText(webhookPetEntry, petName, isS
     if # enchantNames == 0 then
         return nil
     end
-    return "\240\159\147\153 Enchant: "..table.concat(enchantNames, ", ")
+    local enchantLines = {
+        "<:orange_book:1462135985759326370> **Enchantments**:"
+    }
+    for enchantIndex = 1, # enchantNames do
+        table.insert(enchantLines, "\t > **<:four_leaf_clover:1462133363182796810> "..enchantNames[enchantIndex].."**")
+    end
+    return table.concat(enchantLines, "\n")
 end
 local function isSpecialEnchant(scriptStateADR)
     local scriptStateABZ = getEnchantData(scriptStateADR)
@@ -7519,6 +8413,11 @@ local function getWebhookAvatarUrl(scriptStateWL)
     return"x"..
     string.format("%.4g", scriptStateWL)
 end
+activeStates.BGSI_Lite_GetWebhookPetStatValue = function(webhookStatValue)
+    local formattedStatValue = string.format("%.4f", tonumber(webhookStatValue) or 0)
+    formattedStatValue = formattedStatValue:gsub("0+$", ""):gsub("%.$", "")
+    return "x"..formattedStatValue
+end
 local function getWebhookRequestFunction()
     local scriptStateUY = {
         Coins = 0,
@@ -7665,26 +8564,72 @@ local function checkLowCurrencyWebhook(scriptStateAFQ, scriptStateDP)
     end
     return 100
 end
-local function getPetVariantName(scriptStateSU)
+local function getPetVariantName(scriptStateSU, webhookPetEntry)
     if not remoteFunction or type(scriptStateSU) ~= "string" or scriptStateSU == "" then
         return nil
     end
-    local scriptStateXU, scriptStateRH = pcall(function()
-        return remoteFunction:InvokeServer("GetExisting", scriptStateSU)
-    end)
-    if not scriptStateXU then
+
+    local function getExistingCount(existingValue)
+        if type(existingValue) == "number" then
+            return math.floor(existingValue)
+        end
+        if type(existingValue) == "string" then
+            local cleanedValue = existingValue:gsub(",", "")
+            local existingCount = tonumber(cleanedValue) or tonumber(cleanedValue:match("%d+"))
+            return existingCount and math.floor(existingCount) or nil
+        end
+        if type(existingValue) == "table" then
+            for _, existingKey in ipairs({scriptStateSU, "Existing", "Exists", "Exist", "Count", "Total", "Amount", "Value", "existing", "exists", "exist", "count", "total", "amount", "value"}) do
+                local existingCount = getExistingCount(existingValue[existingKey])
+                if existingCount then
+                    return existingCount
+                end
+            end
+        end
         return nil
     end
-    if type(scriptStateRH) == "number" then
-        return math.floor(scriptStateRH)
-    end
-    if type(scriptStateRH) == "string" then
-        local scriptStateAEK = tonumber(scriptStateRH) or tonumber(scriptStateRH:match("%d+"))
-            if scriptStateAEK then
-            return math.floor(scriptStateAEK)
+
+    if type(webhookPetEntry) == "table" then
+        local nestedPet = type(webhookPetEntry.Pet) == "table" and webhookPetEntry.Pet or nil
+        for _, existingValue in pairs({
+            webhookPetEntry.Existing,
+            webhookPetEntry.Exists,
+            webhookPetEntry.Exist,
+            webhookPetEntry.ExistCount,
+            webhookPetEntry.existing,
+            webhookPetEntry.exists,
+            webhookPetEntry.exist,
+            webhookPetEntry.existCount,
+            nestedPet and nestedPet.Existing,
+            nestedPet and nestedPet.Exists,
+            nestedPet and nestedPet.Exist,
+            nestedPet and nestedPet.ExistCount,
+            nestedPet and nestedPet.existing,
+            nestedPet and nestedPet.exists,
+            nestedPet and nestedPet.exist,
+            nestedPet and nestedPet.existCount,
+        }) do
+            local existingCount = getExistingCount(existingValue)
+            if existingCount then
+                return existingCount
+            end
         end
     end
-    return nil
+
+    local latestExistingCount
+    for existingAttempt = 1, 4 do
+        local requestSucceeded, existingResponse = pcall(function()
+            return remoteFunction:InvokeServer("GetExisting", scriptStateSU)
+        end)
+        local existingCount = requestSucceeded and getExistingCount(existingResponse) or nil
+        if existingCount and(not latestExistingCount or existingCount > latestExistingCount) then
+            latestExistingCount = existingCount
+        end
+        if existingAttempt < 4 then
+            task.wait(0.4)
+        end
+    end
+    return latestExistingCount
 end
 local function buildPetWebhookEmbed(scriptStateHC, scriptStateRV, scriptStateHH, scriptStateVT)
     if type(scriptStateHC) ~= "string" or scriptStateHC == "" then
@@ -7762,42 +8707,6 @@ local function sendPetWebhook(scriptStateUL, scriptStateADL, scriptStateXY)
     end
     return nil
 end
-local function normalizeVariantList(scriptStatePH)
-    if scriptStatePH < 1e-06 then
-        return string.format("%.2e%%", scriptStatePH)
-    elseif scriptStatePH < 0.01 then
-        return string.format("%.8f%%", scriptStatePH)
-    else
-        return string.format("%.6f%%", scriptStatePH)
-    end
-end
-local function findPetByNameAndVariant(scriptStateJM, scriptStateACU, scriptStateZU)
-    if not scriptStateJM and not scriptStateACU and not scriptStateZU then
-        return nil
-    end
-    if scriptStateZU then
-        if scriptStateJM and scriptStateACU then
-            return"SM XL"
-        end
-        if scriptStateJM then
-            return"Shiny XL"
-        end
-        if scriptStateACU then
-            return"Mythic XL"
-        end
-        return"XL"
-    end
-    if scriptStateJM and scriptStateACU then
-        return"SM"
-    end
-    if scriptStateJM then
-        return"Shiny"
-    end
-    if scriptStateACU then
-        return"Mythic"
-    end
-    return nil
-end
 local function getRebirthMachineCost(scriptStateKB)
     scriptStateKB = tostring(scriptStateKB or "")
     scriptStateKB = scriptStateKB:match("^%s*(.-)%s*$") or ""
@@ -7847,7 +8756,7 @@ local function runRebirthFuse(scriptStateQZ, scriptStateACW)
     end
     return false
 end
-local function runRebirthMachineLoop(scriptStateEI, scriptStateOR, scriptStateXO, scriptStateBZ, scriptStateYR)
+local function runRebirthMachineLoop(scriptStateEI, scriptStateOR, scriptStateXO, scriptStateBZ, scriptStateYR, scriptStateAEL)
     if not Config.webhookEnabled or Config.webhookURL == "" then
         return
     end
@@ -7886,6 +8795,7 @@ local function runRebirthMachineLoop(scriptStateEI, scriptStateOR, scriptStateXO
     for loopSlotBY, webhookURLEntry in ipairs(scriptStateABR) do
         local scriptStateAAK = Config.webhookHidePlayerName == true
             local scriptStateGN =(scriptStateAAK and scriptStateYR) or scriptStateEI
+        local scriptStateQV = type(scriptStateAEL) == "table" and scriptStateAEL or {}
         runRebirthFuse(webhookURLEntry, {
             embeds = {
                 {
@@ -7895,9 +8805,13 @@ local function runRebirthMachineLoop(scriptStateEI, scriptStateOR, scriptStateXO
                     thumbnail = scriptStateBZ and {
                         url = scriptStateBZ
                     } or nil,
+                    image = scriptStateQV.imageUrl and {
+                        url = scriptStateQV.imageUrl
+                    } or nil,
                     footer = {
-                        text = os.date("%Y-%m-%d %H:%M:%S")
+                        text = scriptStateQV.footerText or os.date("%Y-%m-%d %H:%M:%S")
                     },
+                    timestamp = scriptStateQV.timestamp,
                 }
             },
         })
@@ -8144,11 +9058,19 @@ local function incrementWebhookHatchTracker(petDisplayName)
     saveWebhookHatchTracker()
     return currentCount
 end
+local function formatWebhookChancePercent(oneInChance)
+    oneInChance = tonumber(oneInChance) or 0
+    if oneInChance <= 0 then
+        return "0%"
+    end
+    local chancePercent = 100 / oneInChance
+    if chancePercent < 0.000001 then
+        return string.format("%.3g%%", chancePercent)
+    end
+    return string.format("%.8f", chancePercent):gsub("0+$", ""):gsub("%.$", "").."%"
+end
 activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(function(scriptStateKW, scriptStateNY, ...)
     if not isCurrentRun() then
-        return
-    end
-    if not Config.webhookEnabled then
         return
     end
     local scriptStatePO
@@ -8175,7 +9097,61 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
     if not scriptStatePO or type(scriptStatePO) ~= "table" or # scriptStatePO == 0 then
         return
     end
+    if scriptStateKW == "HatchEgg" or scriptStateKW == "HatchPowerupEgg" or scriptStateKW == "ExclusiveHatch" then
+        for _, dashboardHatchPet in ipairs(scriptStatePO) do
+            local dashboardPetName = dashboardHatchPet.Name or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Name) or "Unknown"
+            local dashboardPetInfo = petRarityData and petRarityData[dashboardPetName] or {}
+            local dashboardChancePercent = tonumber(checkLowCurrencyWebhook(dashboardPetName, dashboardPetInfo)) or 100
+            local dashboardOneInChance = dashboardChancePercent > 0 and (100 / dashboardChancePercent) or 0
+            local dashboardShiny = dashboardHatchPet.Shiny or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Shiny) or false
+            local dashboardMythic = dashboardHatchPet.Mythic or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Mythic) or false
+            local dashboardXL = dashboardHatchPet.XL or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.XL) or false
+            if dashboardShiny then
+                dashboardOneInChance = dashboardOneInChance * 40
+            end
+            if dashboardMythic then
+                dashboardOneInChance = dashboardOneInChance * 100
+            end
+            if dashboardXL then
+                dashboardOneInChance = dashboardOneInChance * 400
+            end
+            if dashboardOneInChance > (tonumber(activeStates.BGSI_Lite_DashboardBestHatchChance) or 0) then
+                local dashboardPetDisplayName = buildPetWebhookEmbed(dashboardPetName, dashboardShiny, dashboardMythic, dashboardXL)
+                if isSuperLegendaryWebhookPet(dashboardHatchPet, dashboardPetInfo) then
+                    dashboardPetDisplayName = "Super "..dashboardPetDisplayName
+                end
+                activeStates.BGSI_Lite_DashboardBestHatchName = dashboardPetDisplayName
+                activeStates.BGSI_Lite_DashboardBestHatchChance = dashboardOneInChance
+            end
+            local dashboardIsSuper = isSuperLegendaryWebhookPet(dashboardHatchPet, dashboardPetInfo)
+            local dashboardRarity = dashboardIsSuper and "Super Legendary" or tostring(dashboardPetInfo.Rarity or "Unknown")
+            if dashboardRarity == "Secret" or dashboardRarity == "Infinity" or dashboardIsSuper then
+                local dashboardHatches = activeStates.BGSI_Lite_DashboardPendingHatches
+                if type(dashboardHatches) == "table" then
+                    table.insert(dashboardHatches, {
+                        eventId = HttpService:GenerateGUID(false),
+                        petName = tostring(dashboardPetName),
+                        rarity = dashboardRarity,
+                        chance = dashboardOneInChance,
+                        eggName = tostring(activeStates.BGSI_Lite_CurrentEggName or ""),
+                        shiny = dashboardShiny == true,
+                        mythic = dashboardMythic == true,
+                        xl = dashboardXL == true,
+                        super = dashboardIsSuper,
+                    })
+                    if #dashboardHatches > 500 then
+                        table.remove(dashboardHatches, 1)
+                    end
+                end
+            end
+        end
+    end
+    if not Config.webhookEnabled then
+        return
+    end
+    local resolvedWebhookPetIds = {}
     for loopSlotAA, scriptStateACH in ipairs(scriptStatePO) do
+        activeStates.BGSI_Lite_LastWebhookStoredPet = nil
         if loopSlotAA > 1 then
             task.wait(0.1)
         end
@@ -8193,36 +9169,19 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
         if not shouldSendPetWebhookEntry(scriptStateACH, scriptStateFL, scriptStatePG, scriptStateLS, scriptStateNI, scriptStateKK) then
             continue
         end
-        local scriptStateKY = 3447003
-            if scriptStatePG == "Secret" then
-            if scriptStateLS and scriptStateNI then
-                scriptStateKY = 65280
-            elseif scriptStateNI then
-                scriptStateKY = 16753920
-            elseif scriptStateLS then
-                scriptStateKY = 16776960
-            else
-                scriptStateKY = 16711680
-            end
-        elseif scriptStatePG == "Infinity" then
-            if scriptStateLS and scriptStateNI then
-                scriptStateKY = 65280
-            elseif scriptStateNI then
-                scriptStateKY = 16753920
-            elseif scriptStateLS then
-                scriptStateKY = 16776960
-            else
-                scriptStateKY = 10181046
-            end
-        elseif isSuperLegendaryPet then
-            scriptStateKY = 16766720
+        local scriptStateKY
+        if scriptStateLS and scriptStateNI then
+            scriptStateKY = tonumber("00FF00", 16)
+        elseif scriptStateNI then
+            scriptStateKY = tonumber("5E03FC", 16)
+        elseif scriptStateLS then
+            scriptStateKY = tonumber("FFFF00", 16)
+        else
+            scriptStateKY = tonumber("FF0000", 16)
         end
-        local scriptStateAK = getWebhookRequestFunction()
-            local scriptStateVZ = getDiscordTimestamp()
-        local scriptStateXR = string.format("‌🟣 Current Bubbles: %s\n🪙 Coins: %s\n💎 Gems: %s\n🥚 Total Eggs: %s\n🍀 Luck: %s\n❓ Secret luck: %s\n♾️ Infinity luck: %s", getShrineAmountValue(scriptStateVZ.BubblesBlown), getShrineAmountValue(scriptStateAK.Coins), getShrineAmountValue(scriptStateAK.Gems), runShrineDonation(scriptStateVZ.EggsHatched), tostring(scriptStateAK.LuckDisplay), tostring(scriptStateAK.SecretLuckDisplay), tostring(scriptStateAK.InfinityLuckDisplay))
-            local scriptStateAFP = 1
-            if scriptStateKK then
-            scriptStateAFP = 2
+        local scriptStateAFP = 1
+        if scriptStateKK then
+            scriptStateAFP = tonumber(sharedConstants and sharedConstants.XLMultiplier) or 2.5
         end
         if scriptStateLS and scriptStateNI then
             scriptStateAFP = scriptStateAFP * 2.25
@@ -8231,30 +9190,14 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
         elseif scriptStateNI then
             scriptStateAFP = scriptStateAFP * 1.75
         end
-        local scriptStateYA = {
-        }
-        if type(scriptStateEQ.Stats) == "table" then
-            for loopSlotCH, scriptStateACC in pairs(scriptStateEQ.Stats) do
-                local scriptStateAAB = scriptStateDX[loopSlotCH] or ""
-                table.insert(scriptStateYA, string.format("\226\128\140%s %s: +%s", scriptStateAAB, loopSlotCH, runShrineDonation(math.floor(scriptStateACC * scriptStateAFP))))
-            end
-        end
-        if isSuperLegendaryPet then
-            local superLegendaryEnchantText = getWebhookSuperLegendaryEnchantText(scriptStateACH, scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
-            if superLegendaryEnchantText then
-                table.insert(scriptStateYA, superLegendaryEnchantText)
-            end
-        end
-        if scriptStateEQ.Tag and scriptStateEQ.Tag ~= "" then
-            table.insert(scriptStateYA, "\240\159\143\183\239\184\143 Origins: "..tostring(scriptStateEQ.Tag))
-        end
-        local scriptStateZY =(# scriptStateYA > 0) and table.concat(scriptStateYA, "\n") or "No stats available"
         local webhookPetDisplayName = buildPetWebhookEmbed(scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
-        local scriptStateBR = getPetVariantName(webhookPetDisplayName)
-        local webhookHatchCount = incrementWebhookHatchTracker(webhookPetDisplayName)
-        scriptStateZY = scriptStateZY.."\n\nExist: "..(scriptStateBR and runShrineDonation(scriptStateBR) or "—").."\nYou've hatched this pet "..runShrineDonation(webhookHatchCount).." "..(webhookHatchCount == 1 and "time!" or "times!")
-        local webhookPetId = activeStates.BGSI_Lite_GetWebhookPetEntryId(scriptStateACH) or "Unknown"
-        scriptStateZY = scriptStateZY.."\n\240\159\144\182 Pet ID: ``"..tostring(webhookPetId).."``"
+        local webhookPetTitleName = (isSuperLegendaryPet and "Super " or "")..webhookPetDisplayName
+        local scriptStateBR = getPetVariantName(webhookPetTitleName, scriptStateACH)
+        local webhookHatchCount = incrementWebhookHatchTracker(webhookPetTitleName)
+        local webhookPetId = activeStates.BGSI_Lite_GetResolvedWebhookPetId(scriptStateACH, scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK, resolvedWebhookPetIds) or "Unknown"
+        if webhookPetId ~= "Unknown" then
+            resolvedWebhookPetIds[tostring(webhookPetId)] = true
+        end
         local scriptStateMO = checkLowCurrencyWebhook(scriptStateFL, scriptStateEQ)
             local scriptStateAEC = 100 / scriptStateMO
         local scriptStateYS = 1
@@ -8268,15 +9211,6 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
             scriptStateYS = scriptStateYS * 400
         end
         local scriptStateDO = scriptStateAEC * scriptStateYS
-            local scriptStatePV =(1 / scriptStateDO) * 100
-        local scriptStateVJ = math.floor(scriptStateAEC)
-            local scriptStateAEX =(1 / scriptStateAEC) * 100
-        local scriptStateBX = string.format("Base: 1/%s (%s)", runShrineDonation(scriptStateVJ), normalizeVariantList(scriptStateAEX))
-            local scriptStateXK = scriptStateBX
-            if scriptStateYS > 1 then
-            local scriptStateAEG = findPetByNameAndVariant(scriptStateLS, scriptStateNI, scriptStateKK) or "Variant"
-            scriptStateXK = string.format("%s | %s: 1/%s (%s)", scriptStateBX, scriptStateAEG, runShrineDonation(math.floor(scriptStateDO)), normalizeVariantList(scriptStatePV))
-        end
         local scriptStateWG = sendPetWebhook(scriptStateEQ, scriptStateLS, scriptStateNI)
             local scriptStateAEB = isSuperLegendaryPet and "Super Legendary" or scriptStatePG
             if scriptStateEQ.Celestial == true then
@@ -8284,32 +9218,90 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
         elseif scriptStateEQ.Infinity == true then
             scriptStateAEB = "Infinity"
         end
-        local scriptStateABD = findPetByNameAndVariant(scriptStateLS, scriptStateNI, scriptStateKK) or ""
-            local function runAdminRebirthMachineLoop(scriptStateOS)
-            if scriptStateABD ~= "" then
-                return string.format("%s hatched a %s \"%s\" %s", scriptStateOS, scriptStateABD, scriptStateAEB, scriptStateFL)
+        local scriptStateAEO = {}
+        local webhookPlayer = Players.LocalPlayer
+        local webhookPlayerName = Config.webhookHidePlayerName == true and "Player" or(webhookPlayer and webhookPlayer.Name or LocalPlayer.Name)
+        local webhookUserStats = getWebhookRequestFunction()
+        local webhookUserTotals = getDiscordTimestamp()
+        local webhookUserInfoLines = {
+            "<:purple_circle:1363755750828019774> Current Bubbles: **"..getShrineAmountValue(webhookUserTotals.BubblesBlown).."**",
+            "🪙 Coins: **"..getShrineAmountValue(webhookUserStats.Coins).."**",
+            "<:gem:1363755998401269854> Gems: **"..getShrineAmountValue(webhookUserStats.Gems).."**",
+            "<:egg:1377264232915013673> Total Eggs: **"..runShrineDonation(webhookUserTotals.EggsHatched).."**",
+            "<:four_leaf_clover:1462133363182796810> Luck: **"..tostring(webhookUserStats.LuckDisplay).."**",
+            "❓ Secret luck: **"..tostring(webhookUserStats.SecretLuckDisplay).."**",
+            "♾️ Infinity luck: **"..tostring(webhookUserStats.InfinityLuckDisplay).."**",
+        }
+        if isSuperLegendaryPet then
+            local superLegendaryEnchantText = getWebhookSuperLegendaryEnchantText(scriptStateACH, scriptStateFL, scriptStateLS, scriptStateNI, scriptStateKK)
+            if superLegendaryEnchantText then
+                table.insert(scriptStateAEO, superLegendaryEnchantText)
             end
-            return string.format("%s hatched a \"%s\" %s", scriptStateOS, scriptStateAEB, scriptStateFL)
         end
-        local scriptStateXT = runAdminRebirthMachineLoop(LocalPlayer.Name)
-            local scriptStateGO = runAdminRebirthMachineLoop("Player")
+        local webhookPetTier = tonumber(scriptStateACH.Tier or(scriptStateACH.Pet and scriptStateACH.Pet.Tier) or scriptStateEQ.Tier)
+        if webhookPetTier then
+            table.insert(scriptStateAEO, "<:crossed_swords:1411581143114846318> Pet Tier: **"..runShrineDonation(webhookPetTier).."**")
+        end
+        if scriptStateEQ.Tag and scriptStateEQ.Tag ~= "" then
+            table.insert(scriptStateAEO, "🏷️ Origins: **"..tostring(scriptStateEQ.Tag).."**")
+        end
+        local webhookStatEmojis = {
+            Bubbles = "<:purple_circle:1363755750828019774>",
+            CarnivalCoins = "<:circus_tent:1520159699230785707>",
+            Gems = "<:gem:1363755998401269854>",
+        }
+        local addedWebhookStats = {}
+        if type(scriptStateEQ.Stats) == "table" then
+            for _, webhookStatName in ipairs({"Bubbles", "CarnivalCoins", "Gems"}) do
+                local webhookStatValue = scriptStateEQ.Stats[webhookStatName]
+                if type(webhookStatValue) == "number" then
+                    table.insert(scriptStateAEO, webhookStatEmojis[webhookStatName].." "..webhookStatName..": **"..activeStates.BGSI_Lite_GetWebhookPetStatValue(webhookStatValue * scriptStateAFP).."**")
+                    addedWebhookStats[webhookStatName] = true
+                end
+            end
+            for webhookStatName, webhookStatValue in pairs(scriptStateEQ.Stats) do
+                if type(webhookStatValue) == "number" and not addedWebhookStats[webhookStatName] then
+                    local webhookStatEmoji = scriptStateDX[webhookStatName] or ""
+                    table.insert(scriptStateAEO, webhookStatEmoji.." "..webhookStatName..": **"..activeStates.BGSI_Lite_GetWebhookPetStatValue(webhookStatValue * scriptStateAFP).."**")
+                end
+            end
+        end
+        table.insert(scriptStateAEO, "")
+        table.insert(scriptStateAEO, "Exist: **"..(scriptStateBR and runShrineDonation(scriptStateBR) or "0").."**")
+        table.insert(scriptStateAEO, "You've hatched this pet **"..runShrineDonation(webhookHatchCount).."** time"..(webhookHatchCount == 1 and "!" or "s!"))
+        if isSuperLegendaryPet then
+            table.insert(scriptStateAEO, "**Server Id**:\n```"..tostring(game.JobId).."```")
+        end
+        local webhookVariantLabel = scriptStateLS and scriptStateNI and "SM" or(scriptStateLS and "S" or(scriptStateNI and "M" or ""))
+        if scriptStateKK then
+            webhookVariantLabel = webhookVariantLabel ~= "" and webhookVariantLabel.." XL" or "XL"
+        end
+        if isSuperLegendaryPet then
+            webhookVariantLabel = webhookVariantLabel ~= "" and "Super "..webhookVariantLabel or "Super"
+        end
+        local scriptStateXT = webhookPlayerName.." hatched a "..(webhookVariantLabel ~= "" and webhookVariantLabel.." " or "")..'"'..scriptStateAEB..'" '..scriptStateFL
+        local scriptStateGO = scriptStateXT
         runRebirthMachineLoop(scriptStateXT, scriptStateKY, {
             {
                 name = "User Info",
-                value = scriptStateXR,
+                value = table.concat(webhookUserInfoLines, "\n"),
                 inline = false
             },
             {
                 name = "Pet Info",
-                value = scriptStateZY,
+                value = table.concat(scriptStateAEO, "\n"),
                 inline = false
             },
             {
                 name = "Chance",
-                value = scriptStateXK,
+                value = "Base: **1/"..runShrineDonation(math.floor(scriptStateAEC)).."** ("..formatWebhookChancePercent(scriptStateAEC)..") | "..(webhookVariantLabel ~= "" and webhookVariantLabel or "Final")..": **1/"..runShrineDonation(math.floor(scriptStateDO)).."** ("..formatWebhookChancePercent(scriptStateDO)..")",
                 inline = false
             },
-        }, scriptStateWG, scriptStateGO)
+        }, scriptStateKK and nil or scriptStateWG, scriptStateGO, {
+            imageUrl = scriptStateKK and scriptStateWG or nil,
+            footerText = "@76yx | #"..runShrineDonation(webhookHatchCount).." | "..tostring(webhookPetId),
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%S.000Z"),
+        })
     end
 end)
 end
