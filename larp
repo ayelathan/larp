@@ -67,29 +67,6 @@ pcall(function()
         openUi:Destroy()
     end
 end)
-task.spawn(function()
-    repeat
-        task.wait()
-    until CoreGui:FindFirstChild("RobloxPromptGui")
-    local robloxPromptGui = CoreGui:FindFirstChild("RobloxPromptGui")
-            local promptOverlay = robloxPromptGui and robloxPromptGui:FindFirstChild("promptOverlay") or robloxPromptGui and robloxPromptGui:WaitForChild("promptOverlay", 30)
-            if not promptOverlay then
-        return
-    end
-    promptOverlay.ChildAdded:Connect(function(promptChild)
-        if promptChild.Name == "ErrorPrompt" then
-            task.spawn(function()
-                while true do
-                    pcall(function()
-                        TeleportService:Teleport(game.PlaceId, LocalPlayer)
-                    end)
-                    task.wait(2)
-                end
-            end)
-        end
-    end)
-end)
-
 local configFile = "1rzHubLiteConfig.json"
             local defaultConfig = {
     autoCollectPresentRain = false,
@@ -943,10 +920,17 @@ local teleportOffsetY = 3
 end
 -- Hatch helper: fires the hatch remote with the selected egg and hatch amount.
 local function fireHatchEgg(scriptStateQC)
-    if type(scriptStateQC) ~= "string" or scriptStateQC == "" then
-        return
+    if not isCurrentRun() or type(scriptStateQC) ~= "string" or scriptStateQC == "" then
+        return false
     end
-    pcall(function()
+
+    local requestTime = tick()
+    if requestTime - (tonumber(activeStates.BGSI_Lite_LastHatchRequestAt) or 0) < 0.1 then
+        return false
+    end
+    activeStates.BGSI_Lite_LastHatchRequestAt = requestTime
+
+    return pcall(function()
         remoteEvent:FireServer("HatchEgg", scriptStateQC, getMaxHatchAmount())
     end)
 end
@@ -1324,14 +1308,12 @@ local gemReserveThreshold = 4999000000000
             end)
             scriptStateAEP = tick()
         end
-        pcall(function()
-            remoteEvent:FireServer("HatchEgg", scriptStateTY, getMaxHatchAmount())
-        end)
+        fireHatchEgg(scriptStateTY)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-        task.wait(0.05)
+        task.wait(0.1)
     end
 end
 local function spendGemsDownToReserve(scriptStateACD, scriptStateEM)
@@ -1494,14 +1476,12 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
             end)
             scriptStateUA = tick()
         end
-        pcall(function()
-            remoteEvent:FireServer("HatchEgg", scriptStateYV, getMaxHatchAmount())
-        end)
+        fireHatchEgg(scriptStateYV)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-        task.wait(0.05)
+        task.wait(0.1)
     end
 end
 activeStates.BGSI_Lite_SellBubble = function()
@@ -2471,6 +2451,15 @@ local function clearDisabledPriorityStates()
     if activeStates.BGSI_Lite_ChallengePassActive and Config.autoChallengePassQuests ~= true then
         activeStates.BGSI_Lite_ChallengePassActive = false
     end
+    if activeStates.BGSI_Lite_RiftEggActive and Config.autoRiftEgg ~= true then
+        activeStates.BGSI_Lite_RiftEggActive = false
+    end
+    if activeStates.BGSI_Lite_BountyRiftActive and Config.spawnRift ~= true then
+        activeStates.BGSI_Lite_BountyRiftActive = false
+    end
+    if activeStates.BGSI_Lite_SpecialRiftActive and Config.autoSpecialRift ~= true then
+        activeStates.BGSI_Lite_SpecialRiftActive = false
+    end
 end
 local scriptStateGV, scriptStateSR = nil, nil
 local pauseInProgress = false
@@ -2500,7 +2489,7 @@ local function resumeNormalAutomation()
     activeStates.BGSI_Lite_NormalAutomationPaused = false
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         task.wait(5)
         clearDisabledPriorityStates()
         local lastQuestWork = tonumber(activeStates.BGSI_Lite_LastQuestAutomationAt) or 0
@@ -3113,7 +3102,7 @@ Fluent:Notify({
         end)
         rebirthUpdateShowOthersButton()
         rebirthUpdateLabelsVisibility()
-        while true do
+        while isCurrentRun() do
             task.wait(1)
             local scriptStateXA = getPlayerDataSnapshot()
             local rebirthSelectedEgg = tostring(Config.selectedEgg or "")
@@ -3423,8 +3412,8 @@ activeStates.BGSI_Lite_SpecialRiftActive = false
 task.spawn(function()
     local luckEggCooldown = 0
     local luckEggReadinessLogAt = 0
-    while true do
-        task.wait(Config.autoLuckEgg and 0.05 or 0.85)
+    while isCurrentRun() do
+        task.wait(Config.autoLuckEgg and 0.1 or 0.85)
         if Config.autoLuckEgg ~= true then
             if activeStates.BGSI_Lite_LuckEggActive then
                 activeStates.BGSI_Lite_LuckEggActive = false
@@ -3476,18 +3465,22 @@ task.spawn(function()
                 luckEggCooldown = tick()
             end
         end
-        pcall(function()
-            remoteEvent:FireServer("HatchEgg", luckEggName, getMaxHatchAmount())
-        end)
+        fireHatchEgg(luckEggName)
     end
 end)
 task.spawn(function()
     local scriptStateAFX = 0
-    while true do
-        task.wait(Config.autoHatch and 0.05 or 0.85)
+    local autoHatchStartedAt = 0
+    local lastHatchRecoveryAt = 0
+    while isCurrentRun() do
+        task.wait(Config.autoHatch and 0.1 or 0.85)
         if Config.autoHatch ~= true then
             scriptStateAFX = 0;
+            autoHatchStartedAt = 0
             continue
+        end
+        if autoHatchStartedAt == 0 then
+            autoHatchStartedAt = tick()
         end
         clearDisabledPriorityStates()
         if isPriorityAutomationActive() or activeStates.BGSI_Lite_SpecialRiftActive or activeStates.BGSI_Lite_LuckEggActive or activeStates.BGSI_Lite_RiftEggActive or activeStates.BGSI_Lite_BountyRiftActive then
@@ -3509,11 +3502,16 @@ task.spawn(function()
             end)
             scriptStateAFX = teleportSucceeded and tick() or tick() - 8.5
         end
+        local lastHatchAt = math.max(autoHatchStartedAt, tonumber(activeStates.BGSI_Lite_LastHatchEventAt) or 0)
+        if tick() - lastHatchAt >= 12 and tick() - lastHatchRecoveryAt >= 10 then
+            activeStates.BGSI_Lite_ForceAutoHatchTeleport = true
+            lastHatchRecoveryAt = tick()
+        end
         fireHatchEgg(scriptStateEL)
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         task.wait(Config.autoSpamE and 0.05 or 0.85)
         if Config.autoSpamE ~= true then
             continue
@@ -3915,7 +3913,7 @@ activeStates.BGSI_Lite_UpdateBountyInfoParagraph = function()
     end
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         pcall(activeStates.BGSI_Lite_UpdateBountyInfoParagraph)
         task.wait(1)
     end
@@ -3970,8 +3968,8 @@ local scriptStateAAR = false
 end
 task.spawn(function()
     local scriptStatePN = 0
-    while true do
-        task.wait(Config.autoBounty and 0.05 or 0.85)
+    while isCurrentRun() do
+        task.wait(Config.autoBounty and 0.1 or 0.85)
         if Config.autoBounty ~= true then
             continue
         end
@@ -4129,7 +4127,7 @@ activeStates.BGSI_Lite_SummonBountyRift = function(forceSpawn)
 end
 task.spawn(function()
     local bountyRiftTeleportAt = 0
-    while true do
+    while isCurrentRun() do
         task.wait(Config.spawnRift and 1 or 2)
         if not Config.spawnRift then
             activeStates.BGSI_Lite_BountyRiftActive = false
@@ -4425,7 +4423,7 @@ do
         end,
     })
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoClaimWorldChest and 1 or 0.85)
             if Config.autoClaimWorldChest then
                 claimChestByName(Config.selectedWorldChest)
@@ -4434,7 +4432,7 @@ do
     end)
     task.spawn(function()
         local scriptStateACV = 0
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoChestSummon and 1 or 0.85)
             if Config.autoChestSummon and tick() - scriptStateACV >= 3600 then
                 summonMoonRiftIfNeeded(Config.selectedChest)
@@ -4444,7 +4442,7 @@ do
     end)
     task.spawn(function()
         local scriptStateZW = 0
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoChest and 0.3 or 0.85)
             if Config.autoChest then
                 if tick() - scriptStateZW >= 3 then
@@ -4644,7 +4642,7 @@ do
         end,
     })
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoRiftEggSpawn and 1 or 0.85)
             if Config.autoRiftEggSpawn then
                 local scriptStateLT = tostring(Config.selectedRiftEgg or "")
@@ -4658,8 +4656,8 @@ do
     end)
     task.spawn(function()
         local riftActiveCooldown = 0
-        while true do
-            task.wait(Config.autoRiftEgg and 0.05 or 0.85)
+        while isCurrentRun() do
+            task.wait(Config.autoRiftEgg and 0.1 or 0.85)
             if not Config.autoRiftEgg then
                 activeStates.BGSI_Lite_RiftEggActive = false
                 continue
@@ -4752,8 +4750,8 @@ do
     end
     task.spawn(function()
         local specialRiftTeleportAt = 0
-        while true do
-            task.wait(Config.autoSpecialRift and 0.05 or 0.85)
+        while isCurrentRun() do
+            task.wait(Config.autoSpecialRift and 0.1 or 0.85)
             if Config.autoSpecialRift ~= true then
                 activeStates.BGSI_Lite_SpecialRiftActive = false
                 specialRiftTeleportAt = 0
@@ -4900,7 +4898,7 @@ do
         end,
     })
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.potionAuto and 0.15 or 0.85)
             if Config.potionAuto then
                 pcall(function()
@@ -5089,7 +5087,7 @@ do
     end
 
     activeStates.BGSI_Lite_HopForLuckEgg = function()
-        if activeStates.BGSI_Lite_LuckEggHopInProgress then
+        if not isCurrentRun() or Config.autoHopLuckEgg ~= true or activeStates.BGSI_Lite_LuckEggHopInProgress then
             return
         end
         activeStates.BGSI_Lite_LuckEggHopInProgress = true
@@ -5654,7 +5652,7 @@ do
     })
 
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             if Config.autoBuyShops ~= true then
                 task.wait(0.85)
                 continue
@@ -5753,7 +5751,7 @@ do
         end,
     })
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoPlaytime and 5 or 0.85)
             if Config.autoPlaytime then
                 pcall(function()
@@ -5763,7 +5761,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoClaimPrizes and 2 or 0.85)
             if Config.autoClaimPrizes then
                 pcall(claimAvailablePrizes)
@@ -5773,9 +5771,12 @@ do
     task.spawn(function()
         local searchStartedAt = tick()
         local lastDetectedEggName
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoHopLuckEgg and 2 or 0.85)
             if not Config.autoHopLuckEgg then
+                activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                activeStates.BGSI_Lite_LuckEggHopTarget = nil
+                activeStates.BGSI_Lite_LuckEggHopInProgress = false
                 searchStartedAt = tick()
                 continue
             end
@@ -5800,7 +5801,7 @@ do
     task.spawn(function()
         local previousHatchCount
         local previousSampleTime = tick()
-        while true do
+        while isCurrentRun() do
             task.wait(5)
             if Config.autoHopLuckEgg or Config.autoLuckEgg or Config.dashboardSyncEnabled then
                 local playerData = profileStore:IsReady() and profileStore:Get() or nil
@@ -5954,7 +5955,29 @@ do
             dashboardConfigKeySet[configKey] = true
         end
 
+        activeStates.BGSI_Lite_GetDashboardPetAssetId = function(pet, petInfo)
+            local images = petInfo and petInfo.Images
+            if type(images) ~= "table" then
+                return nil
+            end
+            local image
+            local shiny = pet.Shiny == true or (type(pet.Pet) == "table" and pet.Pet.Shiny == true)
+            local mythic = pet.Mythic == true or (type(pet.Pet) == "table" and pet.Pet.Mythic == true)
+            if shiny and mythic then
+                image = images[4] or images.MythicShiny or images["Shiny Mythic"] or images.ShinyMythic
+            elseif shiny then
+                image = images[2] or images.Shiny
+            elseif mythic then
+                image = images[3] or images.Mythic
+            else
+                image = images[1] or images.Normal
+            end
+            return string.match(tostring(image or ""), "rbxassetid://(%d+)") or string.match(tostring(image or ""), "^(%d+)$")
+        end
+
         task.spawn(function()
+            while isCurrentRun() do
+                local dashboardWorkerOk, dashboardWorkerError = pcall(function()
             local function getDashboardLuckPercent()
                 local luckMultiplier = 1
                 pcall(function()
@@ -5995,36 +6018,19 @@ do
                 return serverCapacity
             end
 
-            local function getDashboardPetAssetId(pet, petInfo)
-                local images = petInfo and petInfo.Images
-                if type(images) ~= "table" then
-                    return nil
-                end
-                local image
-                local shiny = pet.Shiny == true or (type(pet.Pet) == "table" and pet.Pet.Shiny == true)
-                local mythic = pet.Mythic == true or (type(pet.Pet) == "table" and pet.Pet.Mythic == true)
-                if shiny and mythic then
-                    image = images[4] or images.MythicShiny or images["Shiny Mythic"] or images.ShinyMythic
-                elseif shiny then
-                    image = images[2] or images.Shiny
-                elseif mythic then
-                    image = images[3] or images.Mythic
-                else
-                    image = images[1] or images.Normal
-                end
-                return string.match(tostring(image or ""), "rbxassetid://(%d+)") or string.match(tostring(image or ""), "^(%d+)$")
-            end
-
             local function buildDashboardInventory()
                 local inventory = {}
                 local inventoryStacks = {}
                 local playerData = profileStore:IsReady() and profileStore:Get() or nil
                 for _, pet in ipairs(playerData and playerData.Pets or {}) do
+                    if type(pet) ~= "table" then
+                        continue
+                    end
                     local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
                     local petId = tostring(pet.Id or "")
                     local petName = tostring(pet.Name or "Unknown Pet")
                     local petRarity = tostring(petInfo and petInfo.Rarity or "")
-                    local imageAssetId = getDashboardPetAssetId(pet, petInfo)
+                    local imageAssetId = activeStates.BGSI_Lite_GetDashboardPetAssetId(pet, petInfo)
                     local stackKey = table.concat({petName, petRarity, tostring(imageAssetId or ""), tostring(pet.Shiny == true), tostring(pet.Mythic == true), tostring(pet.Super == true)}, "|")
                     local stack = inventoryStacks[stackKey]
                     if not stack then
@@ -6076,12 +6082,20 @@ do
                 end
                 if Config.dashboardSyncEnabled and dashboardEndpoint ~= "" and dashboardIngestToken ~= "" then
                     if type(dashboardRequest) ~= "function" then
+                        local runtimeSyn = type(syn) == "table" and syn or rawget(activeStates, "syn")
+                        dashboardRequest = request or http_request or rawget(activeStates, "request") or rawget(activeStates, "http_request") or (type(runtimeSyn) == "table" and rawget(runtimeSyn, "request"))
+                        if type(dashboardRequest) ~= "function" then
+                            local httpTable = rawget(activeStates, "http")
+                            dashboardRequest = type(httpTable) == "table" and rawget(httpTable, "request") or nil
+                        end
+                    end
+                    if type(dashboardRequest) ~= "function" then
                         if dashboardConnected ~= false then
                             print("["..LocalPlayer.Name.."] Account Dashboard request function unavailable.")
                         end
                         dashboardConnected = false
                         dashboardSyncDelay = math.min(120, dashboardSyncDelay * 2)
-                        continue
+                        return
                     end
 
                     local currentEggName = tostring(activeStates.BGSI_Lite_CurrentEggName or "None")
@@ -6352,6 +6366,10 @@ do
                                         end
                                     end)
                                 elseif dashboardCommand.type == "join-server" then
+                                    if Config.autoHopLuckEgg ~= true then
+                                        activeStates.BGSI_Lite_DashboardJoinTarget = nil
+                                        commandError = "Server hop for 4x egg is disabled"
+                                    else
                                     local targetPlaceId = tonumber(dashboardCommand.placeId) or game.PlaceId
                                     local targetJobId = tostring(dashboardCommand.jobId or "")
                                     local currentLuckEggName = activeStates.BGSI_Lite_LuckEggName
@@ -6411,6 +6429,7 @@ do
                                             end
                                         end)
                                     end
+                                    end
                                 end
                                 if not commandDeferred then
                                     table.insert(pendingDashboardCommandResults, {
@@ -6448,11 +6467,22 @@ do
                     dashboardSyncDelay = 1
                 end
             end
+                end)
+                if not dashboardWorkerOk then
+                    dashboardConnected = false
+                    dashboardSyncDelay = math.min(120, math.max(5, dashboardSyncDelay * 2))
+                    if tick() - dashboardFailureLogAt >= 10 then
+                        print("["..LocalPlayer.Name.."] Account Dashboard worker recovered from an error: "..tostring(dashboardWorkerError))
+                        dashboardFailureLogAt = tick()
+                    end
+                    task.wait(2)
+                end
+            end
         end)
     end
     task.spawn(function()
         local lastJuly4thClaimAt = 0
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoClaimJuly4thRewards and 5 or 0.85)
             if Config.autoClaimJuly4thRewards and tick() - lastJuly4thClaimAt >= 1800 then
                 claimJuly4thRewards()
@@ -6461,7 +6491,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoEquipBestPets and 3 or 0.85)
             if Config.autoEquipBestPets then
                 pcall(function()
@@ -6471,7 +6501,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoUpgradeMastery and 2 or 0.85)
             if Config.autoUpgradeMastery then
                 for thangsCategoryIndex, scriptStateNK in ipairs(scriptStateBY) do
@@ -6487,7 +6517,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoPowerOrbEquipped and 0.4 or 0.85)
             if Config.autoPowerOrbEquipped then
                 local scriptStateAR = getSelectedChestName()
@@ -6510,7 +6540,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoCollectCoins and 2 or 0.85)
             if Config.autoCollectCoins then
                 pcall(installPickupRangeHook)
@@ -6524,7 +6554,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoBubble and 0.03 or 0.85)
             if Config.autoBubble and not isPriorityAutomationActive() then
                 pcall(function()
@@ -6534,7 +6564,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoSell and 1 or 0.85)
             if Config.autoSell and not isPriorityAutomationActive() then
                 activeStates.BGSI_Lite_SellBubble()
@@ -6542,7 +6572,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             task.wait(Config.autoUseFragments and 5 or 0.85)
             if Config.autoUseFragments then
                 local playerData = profileStore:IsReady() and profileStore:Get() or nil
@@ -6565,7 +6595,7 @@ do
         end
     end)
     task.spawn(function()
-        while true do
+        while isCurrentRun() do
             local scriptStateIP = math.clamp(tonumber(Config.autoOpenMysteryDelay) or 0.2, 0.1, 60)
             task.wait(Config.autoOpenMystery and scriptStateIP or 0.85)
             if Config.autoOpenMystery and type(Config.selectedMysteryBox) == "string" and Config.selectedMysteryBox ~= "" then
@@ -7258,7 +7288,7 @@ if Config.autoEnchant then
 end
 task.spawn(function()
     local lastAutoEnchantState = false
-    while true do
+    while isCurrentRun() do
         task.wait(0.3)
         if Config.autoEnchant and not lastAutoEnchantState then
             getEnchantTargetList()
@@ -7585,7 +7615,7 @@ end) do
     })
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoSeason then
             pcall(function()
                 remoteEvent:FireServer("ClaimSeason")
@@ -7761,7 +7791,7 @@ activeStates.ShouldResetChallengePass = function()
 end
 
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoClaimChallengePassRewards then
             pcall(activeStates.ClaimChallengePassRewards)
         end
@@ -7770,7 +7800,7 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoResetChallengePass then
             if activeStates.ShouldResetChallengePass() then
                 activeStates.TryResetChallengePass(false)
@@ -7782,7 +7812,7 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         clearDisabledPriorityStates()
         if Config.autoChallengePassQuests ~= true then
             if activeStates.BGSI_Lite_ChallengePassActive then
@@ -7853,7 +7883,7 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoClaimGlobalIncentive then
             pcall(function()
                 remoteEvent:FireServer("ClaimGlobalIncentiveQuest")
@@ -7960,7 +7990,7 @@ local function runGemGenieTask(loopSlotAE, scriptStateWA)
     return nil
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         clearDisabledPriorityStates()
         if not Config.autoGemGenie then
             if activeStates.BGSI_Lite_GemGenieActive then
@@ -8105,7 +8135,7 @@ local function runSeasonChallengeTask(scriptStateSN)
     return nil
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if not Config.autoDailyHourlyChallenge then
             if activeStates.BGSI_Lite_SeasonActive then
                 activeStates.BGSI_Lite_SeasonActive = false
@@ -8253,7 +8283,7 @@ local function runGlobalIncentiveTask(scriptStateGG)
     return nil
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if not Config.autoGlobalIncentive then
             if activeStates.BGSI_Lite_GlobalIncentiveActive then
                 activeStates.BGSI_Lite_GlobalIncentiveActive = false
@@ -8419,7 +8449,7 @@ end) do
     })
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.DreamerShrineEnabled then
             pcall(function()
                 remoteFunction:InvokeServer("DonateToDreamerShrine", Config.DreamerShrineAmount or 1)
@@ -8429,7 +8459,7 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.shrineAuto then
             pcall(function()
                 remoteFunction:InvokeServer("DonateToShrine", {
@@ -9047,7 +9077,7 @@ task.spawn(function()
         Pearls = 0,
         Tickets = 0
     }
-    while true do
+    while isCurrentRun() do
         task.wait(5)
         if not Config.webhookEnabled or not Config.webhookLowCurrencyEnabled then
             continue
@@ -9230,6 +9260,7 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
         return
     end
     if scriptStateKW == "HatchEgg" or scriptStateKW == "HatchPowerupEgg" or scriptStateKW == "ExclusiveHatch" then
+        activeStates.BGSI_Lite_LastHatchEventAt = tick()
         for _, dashboardHatchPet in ipairs(scriptStatePO) do
             local dashboardPetName = dashboardHatchPet.Name or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Name) or "Unknown"
             local dashboardPetInfo = petRarityData and petRarityData[dashboardPetName] or {}
@@ -9262,7 +9293,7 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
                 dashboardEggName,
                 tostring(dashboardPetName),
                 dashboardRarity,
-                getDashboardPetAssetId(dashboardHatchPet, dashboardPetInfo),
+                activeStates.BGSI_Lite_GetDashboardPetAssetId(dashboardHatchPet, dashboardPetInfo),
                 dashboardShiny == true,
                 dashboardMythic == true,
                 dashboardXL == true,
@@ -9277,7 +9308,7 @@ activeStates.BGSI_Lite_WebhookConnection = remoteEvent.OnClientEvent:Connect(fun
                         rarity = dashboardRarity,
                         chance = dashboardOneInChance,
                         eggName = dashboardEggName,
-                        imageAssetId = getDashboardPetAssetId(dashboardHatchPet, dashboardPetInfo),
+                        imageAssetId = activeStates.BGSI_Lite_GetDashboardPetAssetId(dashboardHatchPet, dashboardPetInfo),
                         shiny = dashboardShiny == true,
                         mythic = dashboardMythic == true,
                         xl = dashboardXL == true,
@@ -10007,7 +10038,7 @@ activeStates.InstallGuessThatPetEvents = function()
     activeStates.GuessThatPetEventsHooked = stateEventOk
 end
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.RebirthMachineEnabled and activeStates.BGSI_Lite_CanUseRebirthMachine() then
             runRebirthMachine(5, Config.RebirthPetName, "UseRebirthMachine")
         end
@@ -10015,7 +10046,7 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.AutoCarnivalRebirth then
             pcall(activeStates.RunAutoCarnivalRebirth)
         end
@@ -10024,7 +10055,7 @@ task.spawn(function()
 end)
 task.spawn(function()
     activeStates.InstallGuessThatPetEvents()
-    while true do
+    while isCurrentRun() do
         if Config.autoGuessThatPet then
             activeStates.InstallGuessThatPetEvents()
             local ok, state = pcall(function()
@@ -10038,13 +10069,13 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         pcall(activeStates.UpdateCarnivalRebirthCountParagraph)
         task.wait(1)
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoCollectCarnivalCoins then
             activeStates.BGSI_Lite_CarnivalPickupActive = true
             pcall(installPickupRangeHook)
@@ -10061,7 +10092,7 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.autoCarnivalChest then
             pcall(function()
                 remoteEvent:FireServer("ClaimChest", "Carnival Chest")
@@ -10071,7 +10102,7 @@ task.spawn(function()
     end
 end)
 task.spawn(function()
-    while true do
+    while isCurrentRun() do
         if Config.AdminRebirthMachineEnabled and activeStates.BGSI_Lite_IsAdminRebirthMachineVisible() and activeStates.BGSI_Lite_CanUseAdminRebirthMachine() then
             runRebirthMachine(4, Config.AdminRebirthPetName, "UseAdminRebirthMachine")
         end
