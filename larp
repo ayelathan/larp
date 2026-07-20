@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.1"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.2"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -6686,27 +6686,24 @@ do
 						local currencyData = safeRequireTable(function()
 							return require(ReplicatedStorage.Shared.Data.Currency)
 						end) or {}
-						local currencyNames = {}
-						for currencyName in pairs(type(playerData.Currencies) == "table" and playerData.Currencies or {}) do
-							currencyNames[tostring(currencyName)] = true
-						end
-						for currencyName in pairs(currencyData) do
-							currencyNames[tostring(currencyName)] = true
-						end
-						currencyNames.Bubbles = true
-						for currencyName in pairs(currencyNames) do
-							local amount = type(playerData.Currencies) == "table" and playerData.Currencies[currencyName]
-								or nil
-							if amount == nil and type(playerData.Stats) == "table" then
-								amount = playerData.Stats[currencyName]
-							end
-							if type(amount) == "number" and amount ~= 0 then
+						local currencyUtil = safeRequireTable(function()
+							return require(ReplicatedStorage.Shared.Utils.CurrencyUtil)
+						end)
+						for currencyName, currencyInfo in pairs(currencyData) do
+							local balanceOk, amount = pcall(currencyUtil.GetBalance, currencyUtil, playerData, currencyName)
+							if balanceOk and type(amount) == "number" and amount ~= 0 then
 								table.insert(details.currencies, {
-									name = currencyName,
+									key = tostring(currencyName),
+									name = tostring(currencyInfo.Display or currencyName),
 									amount = tostring(amount),
-									imageAssetId = getAssetId(currencyData[currencyName], 0, {}),
+									imageAssetId = getAssetId(currencyInfo, 0, {}),
 								})
 							end
+						end
+						local bubbles = tonumber(playerData.Bubbles)
+							or (type(playerData.Stats) == "table" and tonumber(playerData.Stats.Bubbles))
+						if bubbles and bubbles ~= 0 then
+							table.insert(details.currencies, { key = "Bubbles", name = "Bubbles", amount = tostring(bubbles) })
 						end
 						table.sort(details.currencies, function(left, right)
 							return left.name < right.name
@@ -6753,17 +6750,33 @@ do
 							if amount <= 0 then
 								return
 							end
+							local imageAssetId = getAssetId(source, 0, {})
+							local overlayAssetId
+							if not imageAssetId and itemUtil and type(itemUtil.UpdateIcon) == "function" then
+								local iconContainer = Instance.new("Frame")
+								local iconLabel = Instance.new("ImageLabel")
+								iconLabel.Name = "Label"
+								iconLabel.Parent = iconContainer
+								pcall(itemUtil.UpdateIcon, itemUtil, iconContainer, item)
+								local border = iconContainer:FindFirstChild("Border", true)
+								local liquid = iconContainer:FindFirstChild("Liquid", true)
+								imageAssetId = getAssetId(border and border.Image or iconLabel.Image, 0, {})
+								overlayAssetId = getAssetId(liquid and liquid.Image, 0, {})
+								iconContainer:Destroy()
+							end
 							local itemName = getItemText("GetName", item, item.Name)
 							local itemKey = table.concat({ tostring(item.Type), tostring(item.Name), tostring(item.Level or ""), tostring(item.Tier or "") }, "|")
 							table.insert(details.inventory, {
 								key = itemKey,
 								type = tostring(item.Type),
+								rawName = tostring(item.Name),
 								name = itemName,
 								level = tonumber(item.Level),
 								tier = tonumber(item.Tier),
 								amount = amount,
 								description = getItemText("GetDescription", item, source and source.Description),
-								imageAssetId = getAssetId(source, 0, {}),
+								imageAssetId = imageAssetId,
+								overlayAssetId = overlayAssetId,
 								usable = usable == true,
 							})
 						end
@@ -7240,6 +7253,56 @@ do
 												commandError = nil
 												lastInventorySync = 0
 											end
+										elseif dashboardCommand.type == "equip-team" then
+											commandSucceeded, commandError = pcall(function()
+												local playerData = profileStore:IsReady() and profileStore:Get() or nil
+												local ownedPetIds = {}
+												for _, pet in ipairs(playerData and playerData.Pets or {}) do
+													ownedPetIds[tostring(pet.Id or "")] = true
+												end
+												local selectedPetIds = {}
+												for _, petId in ipairs(type(dashboardCommand.petIds) == "table" and dashboardCommand.petIds or {}) do
+													petId = tostring(petId or "")
+													if ownedPetIds[petId] and #selectedPetIds < 20 then
+														table.insert(selectedPetIds, petId)
+													end
+												end
+												if #selectedPetIds == 0 then
+													error("No selected pets are currently owned")
+												end
+												remoteEvent:FireServer("UnequipAllPets")
+												task.wait(0.2)
+												for _, petId in ipairs(selectedPetIds) do
+													remoteEvent:FireServer("EquipPet", petId)
+												end
+											end)
+											if commandSucceeded then
+												commandError = nil
+											end
+										elseif dashboardCommand.type == "enchant-pet" then
+											commandSucceeded, commandError = pcall(function()
+												local petId = tostring(dashboardCommand.petId or "")
+												local playerData = profileStore:IsReady() and profileStore:Get() or nil
+												local selectedPet
+												for _, pet in ipairs(playerData and playerData.Pets or {}) do
+													if tostring(pet.Id or "") == petId then
+														selectedPet = pet
+														break
+													end
+												end
+												if not selectedPet then
+													error("The selected pet is no longer owned")
+												end
+												local lockSlot = tonumber(dashboardCommand.lockSlot)
+												if lockSlot ~= 1 and lockSlot ~= 2 then
+													lockSlot = nil
+												end
+												remoteEvent:FireServer("UseShadowCrystal", petId, lockSlot)
+											end)
+											if commandSucceeded then
+												commandError = nil
+												lastInventorySync = 0
+											end
 										elseif
 											dashboardCommand.type == "use-item"
 											and tostring(dashboardCommand.itemName or "") ~= ""
@@ -7493,6 +7556,9 @@ do
 											})
 										end
 									end
+								end
+								if #pendingDashboardCommandResults > 0 then
+									dashboardSyncDelay = 1
 								end
 							else
 								if tick() - dashboardFailureLogAt >= 10 then
