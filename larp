@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.2"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.3"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -98,7 +98,7 @@ local defaultConfig = {
 	autoEnchant = false,
 	autoPowerOrbEquipped = false,
 	equippedTargetEnchant = "secret-hunter",
-	equippedTargetEnchant2 = "",
+	equippedTargetEnchant2 = "ultra-roller",
 	equippedTargetEnchantLevel = 0,
 	equippedEnchantCurrency = "Auto (Secret = Crystals,Normal = Gems)",
 	autoPlaytime = false,
@@ -7253,56 +7253,6 @@ do
 												commandError = nil
 												lastInventorySync = 0
 											end
-										elseif dashboardCommand.type == "equip-team" then
-											commandSucceeded, commandError = pcall(function()
-												local playerData = profileStore:IsReady() and profileStore:Get() or nil
-												local ownedPetIds = {}
-												for _, pet in ipairs(playerData and playerData.Pets or {}) do
-													ownedPetIds[tostring(pet.Id or "")] = true
-												end
-												local selectedPetIds = {}
-												for _, petId in ipairs(type(dashboardCommand.petIds) == "table" and dashboardCommand.petIds or {}) do
-													petId = tostring(petId or "")
-													if ownedPetIds[petId] and #selectedPetIds < 20 then
-														table.insert(selectedPetIds, petId)
-													end
-												end
-												if #selectedPetIds == 0 then
-													error("No selected pets are currently owned")
-												end
-												remoteEvent:FireServer("UnequipAllPets")
-												task.wait(0.2)
-												for _, petId in ipairs(selectedPetIds) do
-													remoteEvent:FireServer("EquipPet", petId)
-												end
-											end)
-											if commandSucceeded then
-												commandError = nil
-											end
-										elseif dashboardCommand.type == "enchant-pet" then
-											commandSucceeded, commandError = pcall(function()
-												local petId = tostring(dashboardCommand.petId or "")
-												local playerData = profileStore:IsReady() and profileStore:Get() or nil
-												local selectedPet
-												for _, pet in ipairs(playerData and playerData.Pets or {}) do
-													if tostring(pet.Id or "") == petId then
-														selectedPet = pet
-														break
-													end
-												end
-												if not selectedPet then
-													error("The selected pet is no longer owned")
-												end
-												local lockSlot = tonumber(dashboardCommand.lockSlot)
-												if lockSlot ~= 1 and lockSlot ~= 2 then
-													lockSlot = nil
-												end
-												remoteEvent:FireServer("UseShadowCrystal", petId, lockSlot)
-											end)
-											if commandSucceeded then
-												commandError = nil
-												lastInventorySync = 0
-											end
 										elseif
 											dashboardCommand.type == "use-item"
 											and tostring(dashboardCommand.itemName or "") ~= ""
@@ -7324,6 +7274,10 @@ do
 													error("The selected item is no longer owned")
 												end
 												quantity = math.min(quantity, amountBefore)
+												local activeEffectSignature = HttpService:JSONEncode({
+													ActiveBuffs = playerData.ActiveBuffs,
+													ActivePotions = playerData.ActivePotions,
+												})
 												if itemType == "Potion" then
 													remoteEvent:FireServer("UsePotion", itemName, itemLevel, quantity)
 												elseif itemType == "Rune" then
@@ -7357,7 +7311,7 @@ do
 												else
 													error("This item cannot be used from the dashboard")
 												end
-												local updateDeadline = tick() + 5
+												local updateDeadline = tick() + 12
 												repeat
 													task.wait(0.1)
 													playerData = profileStore:IsReady() and profileStore:Get() or nil
@@ -7365,7 +7319,43 @@ do
 													if updatedOk and (tonumber(updatedAmount) or amountBefore) < amountBefore then
 														return
 													end
+													if
+														itemType == "Potion"
+														and type(playerData) == "table"
+														and HttpService:JSONEncode({
+															ActiveBuffs = playerData.ActiveBuffs,
+															ActivePotions = playerData.ActivePotions,
+														}) ~= activeEffectSignature
+													then
+														return
+													end
 												until tick() >= updateDeadline
+												if itemType == "Potion" then
+													remoteEvent:FireServer("UsePotion", itemName, itemLevel, 1)
+													updateDeadline = tick() + 8
+													repeat
+														task.wait(0.1)
+														playerData = profileStore:IsReady() and profileStore:Get() or nil
+														local updatedOk, updatedAmount = pcall(
+															itemUtil.GetOwnedAmount,
+															itemUtil,
+															playerData,
+															item
+														)
+														if updatedOk and (tonumber(updatedAmount) or amountBefore) < amountBefore then
+															return
+														end
+														if
+															type(playerData) == "table"
+															and HttpService:JSONEncode({
+																ActiveBuffs = playerData.ActiveBuffs,
+																ActivePotions = playerData.ActivePotions,
+															}) ~= activeEffectSignature
+														then
+															return
+														end
+													until tick() >= updateDeadline
+												end
 												error("The game did not use " .. itemName)
 											end)
 											if commandSucceeded then
@@ -8379,17 +8369,114 @@ local function getEnchantCurrency(scriptStateVC)
 	end
 	return nil
 end
+local function prepareAutoEnchantTeam()
+	local playerData = profileStore:IsReady() and profileStore:Get() or nil
+	if type(playerData) ~= "table" or type(playerData.Pets) ~= "table" then
+		return false
+	end
+	local candidates = {}
+	for _, pet in ipairs(playerData.Pets) do
+		local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
+		local rarity = petInfo and petInfo.Rarity
+		if
+			pet.Super ~= true
+			and (pet.Shiny == true or pet.IsShiny == true)
+			and (rarity == "Celestial" or rarity == "Secret")
+		then
+			table.insert(candidates, {
+				pet = pet,
+				priority = rarity == "Celestial" and 2 or 1,
+				enchantScore = (findPetEnchantSlot(pet, "secret-hunter") and 1 or 0)
+					+ (findPetEnchantSlot(pet, "ultra-roller") and 1 or 0),
+			})
+		end
+	end
+	if #candidates == 0 then
+		return false
+	end
+	table.sort(candidates, function(leftCandidate, rightCandidate)
+		if leftCandidate.priority ~= rightCandidate.priority then
+			return leftCandidate.priority > rightCandidate.priority
+		end
+		if leftCandidate.enchantScore ~= rightCandidate.enchantScore then
+			return leftCandidate.enchantScore > rightCandidate.enchantScore
+		end
+		return tostring(leftCandidate.pet.Id) < tostring(rightCandidate.pet.Id)
+	end)
+	local maxPetsEquipped = 13
+	pcall(function()
+		local statsModule = require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+		maxPetsEquipped = math.max(1, math.floor(tonumber(statsModule:GetMaxPetsEquipped(playerData)) or 13))
+	end)
+	local selectedPetIds = {}
+	local selectedPetIdSet = {}
+	for index = 1, math.min(maxPetsEquipped, #candidates) do
+		local petId = tostring(candidates[index].pet.Id or "")
+		if petId ~= "" then
+			table.insert(selectedPetIds, petId)
+			selectedPetIdSet[petId] = true
+		end
+	end
+	local equippedPetIds = getEnchantablePets()
+	local teamMatches = #equippedPetIds == #selectedPetIds
+	if teamMatches then
+		for _, petId in ipairs(equippedPetIds) do
+			if not selectedPetIdSet[tostring(petId)] then
+				teamMatches = false
+				break
+			end
+		end
+	end
+	if teamMatches then
+		return true
+	end
+	if tick() - (tonumber(activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt) or 0) < 4 then
+		return false
+	end
+	activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = tick()
+	remoteEvent:FireServer("UnequipAllPets")
+	for _, petId in ipairs(equippedPetIds) do
+		remoteEvent:FireServer("UnequipPet", petId)
+	end
+	task.wait(0.15)
+	for _, petId in ipairs(selectedPetIds) do
+		remoteEvent:FireServer("EquipPet", petId)
+	end
+	local equipDeadline = tick() + 4
+	repeat
+		task.wait(0.2)
+		equippedPetIds = getEnchantablePets()
+		local equippedPetIdSet = {}
+		for _, petId in ipairs(equippedPetIds) do
+			equippedPetIdSet[tostring(petId)] = true
+		end
+		teamMatches = true
+		for _, petId in ipairs(selectedPetIds) do
+			if not equippedPetIdSet[petId] then
+				teamMatches = false
+				remoteEvent:FireServer("EquipPet", petId)
+			end
+		end
+	until teamMatches or tick() >= equipDeadline
+	return teamMatches
+end
 local autoEnchantThreadRunning = false
 -- Auto enchant loop: rerolls equipped pets until the target enchant setup is found.
 local function getEnchantTargetList()
 	if autoEnchantThreadRunning then
 		return
 	end
+	Config.equippedTargetEnchant = "secret-hunter"
+	Config.equippedTargetEnchant2 = "ultra-roller"
 	autoEnchantThreadRunning = true
 	task.spawn(function()
 		while Config.autoEnchant do
-			local targetEnchantOne = Config.equippedTargetEnchant or ""
-			local targetEnchantTwo = Config.equippedTargetEnchant2 or ""
+			if not prepareAutoEnchantTeam() then
+				task.wait(0.5)
+				continue
+			end
+			local targetEnchantOne = "secret-hunter"
+			local targetEnchantTwo = "ultra-roller"
 			local targetEnchantLevel = tonumber(Config.equippedTargetEnchantLevel) or 0
 			local selectedEnchantCurrencyMode = Config.equippedEnchantCurrency
 				or "Auto (Secret = Crystals,Normal = Gems)"
