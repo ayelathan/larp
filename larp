@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.9"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.11"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -108,6 +108,8 @@ local defaultConfig = {
 	autoUpgradeMastery = false,
 	autoCollectCoins = false,
 	autoUseFragments = false,
+	autoBuyFragments = true,
+	selectedFragments = {},
 	dashboardSyncEnabled = true,
 	dashboardSyncAutoEnabled = false,
 	dashboardEndpoint = "",
@@ -135,6 +137,7 @@ local defaultConfig = {
 	autoResetChallengePass = false,
 	autoDailyHourlyChallenge = false,
 	skipTicketPearlQuests = true,
+	questStallTimeoutSeconds = 60,
 	autoGlobalIncentive = false,
 	autoClaimGlobalIncentive = false,
 	DreamerShrineEnabled = false,
@@ -1032,6 +1035,72 @@ local function getBountyTaskProgress(scriptStateL, loopSlotC)
 	end
 	return scriptStatePF
 end
+
+-- Quest safety: stop working a task when its replicated progress has not moved for
+-- a full minute.  A stalled task is deferred briefly so the surrounding quest
+-- loop can continue with other work instead of immediately selecting it again.
+activeStates.BGSI_Lite_QuestNoProgressTimeout = math.clamp(tonumber(Config.questStallTimeoutSeconds) or 60, 30, 300)
+activeStates.BGSI_Lite_QuestStallRetryDelay = 120
+activeStates.BGSI_Lite_StalledQuestTasks = activeStates.BGSI_Lite_StalledQuestTasks or {}
+
+activeStates.BGSI_Lite_GetQuestTaskKey = function(questData, taskIndex)
+	local questId = type(questData) == "table"
+		and (questData.Id or questData.ID or questData.Name or questData.Type)
+	local questTask = type(questData) == "table" and type(questData.Tasks) == "table"
+		and questData.Tasks[taskIndex]
+	local taskId = type(questTask) == "table"
+		and (questTask.Id or questTask.ID or questTask.Name or questTask.Type)
+	return tostring(questId or "quest") .. ":" .. tostring(taskIndex) .. ":" .. tostring(taskId or "task")
+end
+
+activeStates.BGSI_Lite_IsQuestTaskDeferred = function(questData, taskIndex)
+	local taskKey = activeStates.BGSI_Lite_GetQuestTaskKey(questData, taskIndex)
+	local stalledTask = activeStates.BGSI_Lite_StalledQuestTasks[taskKey]
+	if type(stalledTask) ~= "table" then
+		return false
+	end
+	local currentProgress = getBountyTaskProgress(questData, taskIndex)
+	if currentProgress > (tonumber(stalledTask.Progress) or 0) or tick() >= (tonumber(stalledTask.RetryAt) or 0) then
+		activeStates.BGSI_Lite_StalledQuestTasks[taskKey] = nil
+		return false
+	end
+	return true
+end
+
+activeStates.BGSI_Lite_RecordQuestProgress = function(watchState, questData, taskIndex, progress)
+	activeStates.BGSI_Lite_QuestNoProgressTimeout = math.clamp(
+		tonumber(Config.questStallTimeoutSeconds) or 60,
+		30,
+		300
+	)
+	progress = tonumber(progress) or 0
+	if type(watchState) ~= "table" then
+		watchState = { Progress = progress, ChangedAt = tick() }
+	elseif progress > (tonumber(watchState.Progress) or 0) then
+		watchState.Progress = progress
+		watchState.ChangedAt = tick()
+	end
+	if tick() - (tonumber(watchState.ChangedAt) or tick()) < activeStates.BGSI_Lite_QuestNoProgressTimeout then
+		return watchState, false
+	end
+	local taskKey = activeStates.BGSI_Lite_GetQuestTaskKey(questData, taskIndex)
+	activeStates.BGSI_Lite_StalledQuestTasks[taskKey] = {
+		Progress = progress,
+		RetryAt = tick() + activeStates.BGSI_Lite_QuestStallRetryDelay,
+	}
+	if string.find(string.lower(taskKey), "gem-genie", 1, true) then
+		pcall(function()
+			remoteEvent:FireServer("RerollGenie")
+		end)
+	end
+	warn(
+		"[1rzHub Lite] Quest task made no progress for "
+			.. tostring(activeStates.BGSI_Lite_QuestNoProgressTimeout)
+			.. " seconds; moving to the next task:",
+		taskKey
+	)
+	return watchState, true
+end
 local function makeIndexList(scriptStateMG)
 	if type(scriptStateMG) ~= "table" then
 		return {}
@@ -1530,6 +1599,8 @@ local function runCurrencyOrbPrep(scriptStateEV, scriptStateDJ)
 end
 local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, scriptStateAAJ)
 	local scriptStateUA = 0
+	local questProgressWatch
+	local scriptStateStalled
 	while scriptStateAAJ() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateVL = scriptStateWT()
@@ -1542,6 +1613,15 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
 			scriptStateVR = getBountyTaskRequirement(scriptStateIF)
 		end
 		local scriptStateSP = getBountyTaskProgress(scriptStateVL, scriptStateI)
+		questProgressWatch, scriptStateStalled = activeStates.BGSI_Lite_RecordQuestProgress(
+			questProgressWatch,
+			scriptStateVL,
+			scriptStateI,
+			scriptStateSP
+		)
+		if scriptStateStalled then
+			return false, "NoProgress"
+		end
 		if type(scriptStateVR) == "number" and scriptStateSP >= scriptStateVR then
 			break
 		end
@@ -1580,8 +1660,8 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
 	task.wait(0.4)
 	local teleportStartTime = tick()
 	local lastSellTime = 0
-	local lastProgress = -1
-	local lastProgressAt = tick()
+	local questProgressWatch
+	local scriptStateStalled
 	while scriptStateFF() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateABM = scriptStateIO()
@@ -1594,16 +1674,20 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
 			bountyRequirement = getBountyTaskRequirement(selectedPotionCallback)
 		end
 		local bountyProgress = getBountyTaskProgress(scriptStateABM, scriptStatePW)
+		questProgressWatch, scriptStateStalled = activeStates.BGSI_Lite_RecordQuestProgress(
+			questProgressWatch,
+			scriptStateABM,
+			scriptStatePW,
+			bountyProgress
+		)
+		if scriptStateStalled then
+			activeStates.BGSI_Lite_SellBubble()
+			return false, "NoProgress"
+		end
 		if type(bountyRequirement) == "number" and bountyProgress >= bountyRequirement then
 			break
 		end
-		if bountyProgress > lastProgress then
-			lastProgress = bountyProgress
-			lastProgressAt = tick()
-		elseif tick() - lastProgressAt >= 45 then
-			activeStates.BGSI_Lite_SellBubble()
-			break
-		elseif tick() - lastProgressAt >= 3 and tick() - lastSellTime >= 0.75 then
+		if tick() - (tonumber(questProgressWatch.ChangedAt) or tick()) >= 3 and tick() - lastSellTime >= 0.75 then
 			teleportToCFrame(CFrame.new(78, 9, -110))
 			activeStates.BGSI_Lite_SellBubble()
 			lastSellTime = tick()
@@ -2405,6 +2489,7 @@ do
 		end
 		teleportToCFrame(ticketFarmCFrame)
 		local scriptStateLastTeleport = 0
+		local questProgressWatch
 		pcall(function()
 			while scriptStateShouldContinue() do
 				activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
@@ -2415,8 +2500,19 @@ do
 				local scriptStateTask = scriptStateQuest.Tasks and scriptStateQuest.Tasks[scriptStateTaskIndex]
 				local scriptStateNeeded = scriptStateTask and getBountyTaskRequirement(scriptStateTask)
 					or scriptStateRequirement
+				local scriptStateProgress = getBountyTaskProgress(scriptStateQuest, scriptStateTaskIndex)
+				local scriptStateStalled
+				questProgressWatch, scriptStateStalled = activeStates.BGSI_Lite_RecordQuestProgress(
+					questProgressWatch,
+					scriptStateQuest,
+					scriptStateTaskIndex,
+					scriptStateProgress
+				)
+				if scriptStateStalled then
+					break
+				end
 				if
-					getBountyTaskProgress(scriptStateQuest, scriptStateTaskIndex) >= scriptStateNeeded
+					scriptStateProgress >= scriptStateNeeded
 					or scriptStateQuest.Completed == true
 					or (type(scriptStateTask) == "table" and scriptStateTask.Completed == true)
 				then
@@ -2465,6 +2561,7 @@ do
 			until tick() >= scriptStateTeamEquipDeadline
 		end
 		teleportToCFrame(pearlFarmCFrame)
+		local questProgressWatch
 		pcall(function()
 			while scriptStateShouldContinue() do
 				activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
@@ -2475,8 +2572,19 @@ do
 				local scriptStateTask = scriptStateQuest.Tasks and scriptStateQuest.Tasks[scriptStateTaskIndex]
 				local scriptStateNeeded = scriptStateTask and getBountyTaskRequirement(scriptStateTask)
 					or scriptStateRequirement
+				local scriptStateProgress = getBountyTaskProgress(scriptStateQuest, scriptStateTaskIndex)
+				local scriptStateStalled
+				questProgressWatch, scriptStateStalled = activeStates.BGSI_Lite_RecordQuestProgress(
+					questProgressWatch,
+					scriptStateQuest,
+					scriptStateTaskIndex,
+					scriptStateProgress
+				)
+				if scriptStateStalled then
+					break
+				end
 				if
-					getBountyTaskProgress(scriptStateQuest, scriptStateTaskIndex) >= scriptStateNeeded
+					scriptStateProgress >= scriptStateNeeded
 					or scriptStateQuest.Completed == true
 					or (type(scriptStateTask) == "table" and scriptStateTask.Completed == true)
 				then
@@ -2521,6 +2629,7 @@ local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, script
 	task.wait(0.2)
 	local shopItemLoopCount = 0
 	local scriptStateSK = tick()
+	local questProgressWatch
 	while scriptStateSS() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateBL = scriptStateSM()
@@ -2533,6 +2642,16 @@ local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, script
 			scriptStateAP = getBountyTaskRequirement(scriptStateYF)
 		end
 		local scriptStateUX = getBountyTaskProgress(scriptStateBL, scriptStateOX)
+		local scriptStateStalled
+		questProgressWatch, scriptStateStalled = activeStates.BGSI_Lite_RecordQuestProgress(
+			questProgressWatch,
+			scriptStateBL,
+			scriptStateOX,
+			scriptStateUX
+		)
+		if scriptStateStalled then
+			return false, "NoProgress"
+		end
 		if type(scriptStateAP) == "number" and scriptStateUX >= scriptStateAP then
 			break
 		end
@@ -5989,6 +6108,36 @@ do
 		return nil, nil
 	end
 
+	local function resolveAllShopItemSelections(selectedItemNames)
+		local selectedLookup = {}
+		for _, selectedItemName in ipairs(selectedItemNames) do
+			if type(selectedItemName) == "string" and selectedItemName ~= "" then
+				selectedLookup[string.lower(selectedItemName)] = true
+			end
+		end
+
+		local matches = {}
+		for shopName, shopData in pairs(getShopData()) do
+			if type(shopName) == "string" then
+				eachShopSlot(shopName, shopData, function(currentShopName, slotIndex, shopItem)
+					local itemName = getShopItemName(shopItem)
+					if type(itemName) == "string" and selectedLookup[string.lower(itemName)] then
+						table.insert(matches, {
+							shop = currentShopName,
+							slot = slotIndex,
+							item = itemName,
+						})
+					end
+				end)
+			end
+		end
+		table.sort(matches, function(left, right)
+			return tostring(left.shop) .. "|" .. tostring(left.slot)
+				< tostring(right.shop) .. "|" .. tostring(right.slot)
+		end)
+		return matches
+	end
+
 	local function getShopSlotCount(shopName)
 		local shopData = getShopData()[shopName]
 		if type(shopData) ~= "table" then
@@ -6021,12 +6170,44 @@ do
 
 	local shopDropdown
 	local shopItemDropdown
+	local fragmentShopDropdown
+
+	local function getSortedFragmentNames()
+		local fragmentNames = {}
+		local seenFragments = {}
+		local function addFragment(fragmentName)
+			if type(fragmentName) ~= "string" or fragmentName == "" then
+				return
+			end
+			if not string.find(string.lower(fragmentName), "fragment", 1, true) then
+				fragmentName ..= " Fragment"
+			end
+			local fragmentKey = string.lower(fragmentName)
+			if not seenFragments[fragmentKey] then
+				seenFragments[fragmentKey] = true
+				table.insert(fragmentNames, fragmentName)
+			end
+		end
+
+		for fragmentKey, fragmentType in pairs(fragmentTypes) do
+			addFragment(type(fragmentType) == "string" and fragmentType or fragmentKey)
+		end
+		for _, itemName in ipairs(getSortedShopItemNames()) do
+			if string.find(string.lower(itemName), "fragment", 1, true) then
+				addFragment(itemName)
+			end
+		end
+
+		table.sort(fragmentNames)
+		return fragmentNames
+	end
 
 	local function refreshShopDropdowns()
 		refreshShopData()
 
 		local shopNames = getSortedShopNames()
 		local shopItemNames = getSortedShopItemNames()
+		local fragmentNames = getSortedFragmentNames()
 
 		if #shopNames == 0 then
 			shopNames = { "No shops found" }
@@ -6034,9 +6215,13 @@ do
 		if #shopItemNames == 0 then
 			shopItemNames = { "No shop items found" }
 		end
+		if #fragmentNames == 0 then
+			fragmentNames = { "No fragments found" }
+		end
 
 		fireRemoteEventRepeatedly(shopDropdown, shopNames)
 		fireRemoteEventRepeatedly(shopItemDropdown, shopItemNames)
+		fireRemoteEventRepeatedly(fragmentShopDropdown, fragmentNames)
 	end
 
 	gameTab:AddButton({
@@ -6067,6 +6252,29 @@ do
 		Search = true,
 		Callback = function(selectedShopItems)
 			Config.selectedShopItems = selectedShopItems or {}
+			saveConfig()
+		end,
+	})
+
+	fragmentShopDropdown = gameTab:AddDropdown("SelectedFragments", {
+		Title = "Fragments to Buy",
+		Description = "Select one or more fragments. Leave empty to buy every fragment sold by a shop.",
+		Values = getSortedFragmentNames(),
+		Default = Config.selectedFragments or {},
+		Multi = true,
+		Search = true,
+		Callback = function(selectedFragments)
+			Config.selectedFragments = selectedFragments or {}
+			saveConfig()
+		end,
+	})
+
+	gameTab:AddToggle("AutoBuyFragments", {
+		Title = "Auto Buy Fragments",
+		Description = "Safely buys the selected fragments from any shop that currently sells them.",
+		Default = Config.autoBuyFragments ~= false,
+		Callback = function(enabled)
+			Config.autoBuyFragments = enabled == true
 			saveConfig()
 		end,
 	})
@@ -6126,6 +6334,59 @@ do
 							remoteEvent:FireServer("BuyShopItem", shopName, slotIndex, true)
 						end)
 					end
+				end
+			end
+		end
+	end)
+
+	task.spawn(function()
+		local nextTargetIndex = 1
+		local lastPurchaseBySlot = {}
+		local cachedTargets = {}
+		local cachedSelectionKey = ""
+		local targetsUpdatedAt = 0
+		while isCurrentRun() do
+			task.wait(Config.autoBuyFragments ~= false and math.max(0.75, tonumber(Config.shopInterval) or 1) or 0.85)
+			if Config.autoBuyFragments == false then
+				continue
+			end
+
+			local selectedFragments = getSelectedValues(Config.selectedFragments or {})
+			if #selectedFragments == 0 then
+				selectedFragments = getSortedFragmentNames()
+			end
+			if #selectedFragments == 0 then
+				continue
+			end
+
+			local selectionKey = table.concat(selectedFragments, "\0")
+			if selectionKey ~= cachedSelectionKey or os.clock() - targetsUpdatedAt >= 30 then
+				refreshShopData()
+				cachedTargets = resolveAllShopItemSelections(selectedFragments)
+				cachedSelectionKey = selectionKey
+				targetsUpdatedAt = os.clock()
+				nextTargetIndex = 1
+			end
+			if #cachedTargets == 0 then
+				continue
+			end
+			if nextTargetIndex > #cachedTargets then
+				nextTargetIndex = 1
+			end
+
+			local target = cachedTargets[nextTargetIndex]
+			nextTargetIndex += 1
+			local slotKey = tostring(target.shop) .. "|" .. tostring(target.slot)
+			local now = os.clock()
+			if now - (lastPurchaseBySlot[slotKey] or 0) >= 2 then
+				local amountBefore = getInventoryItemAmount(target.item)
+				lastPurchaseBySlot[slotKey] = now
+				pcall(function()
+					remoteEvent:FireServer("BuyShopItem", target.shop, target.slot, true)
+				end)
+				task.wait(0.25)
+				if getInventoryItemAmount(target.item) <= amountBefore then
+					lastPurchaseBySlot[slotKey] = os.clock() + 8
 				end
 			end
 		end
@@ -6418,6 +6679,8 @@ do
 			"autoBubble",
 			"autoSell",
 			"autoUseFragments",
+			"autoBuyFragments",
+			"selectedFragments",
 			"selectedShops",
 			"selectedShopItems",
 			"shopInterval",
@@ -6441,6 +6704,7 @@ do
 			"autoResetChallengePass",
 			"autoDailyHourlyChallenge",
 			"skipTicketPearlQuests",
+			"questStallTimeoutSeconds",
 			"selectedTicketTeam",
 			"selectedTicketReturnTeam",
 			"selectedPearlTeam",
@@ -6683,7 +6947,7 @@ do
 							details.configOptions = cachedConfigOptions
 						else
 						local configOptionSeen = {}
-						local function addConfigOption(configKey, value, label)
+						local function addConfigOption(configKey, value, label, optionData)
 							if value == nil then
 								return
 							end
@@ -6694,10 +6958,15 @@ do
 							end
 							configOptionSeen[configKey][optionKey] = true
 							details.configOptions[configKey] = details.configOptions[configKey] or {}
-							table.insert(details.configOptions[configKey], {
+							local option = {
 								value = value,
 								label = tostring(label or value),
-							})
+							}
+							local imageAssetId = type(optionData) == "table" and getAssetId(optionData, 0, {}) or nil
+							if imageAssetId then
+								option.imageAssetId = imageAssetId
+							end
+							table.insert(details.configOptions[configKey], option)
 						end
 
 						for eggName in pairs(getEggDataLookup()) do
@@ -6751,6 +7020,8 @@ do
 								addConfigOption("gemGenieTargetItem", powerupName)
 								if type(powerup) == "table" and powerup.Type == "Gift" then
 									addConfigOption("selectedMysteryBox", powerupName)
+								elseif type(powerup) == "table" and powerup.Type == "Fragment" then
+									addConfigOption("selectedFragments", powerupName, powerupName, powerup)
 								end
 							end
 						end
@@ -6763,6 +7034,9 @@ do
 							end
 							if type(shopItem) == "string" then
 								addConfigOption("selectedShopItems", shopItem)
+								if string.find(string.lower(shopItem), "fragment", 1, true) then
+									addConfigOption("selectedFragments", shopItem, shopItem, giftData and giftData[shopItem])
+								end
 								return
 							end
 							if type(shopItem) ~= "table" then
@@ -6773,6 +7047,14 @@ do
 								or type(item) == "string" and item
 							if itemName then
 								addConfigOption("selectedShopItems", itemName)
+								if string.find(string.lower(tostring(itemName)), "fragment", 1, true) then
+									addConfigOption(
+										"selectedFragments",
+										itemName,
+										itemName,
+										type(item) == "table" and item or giftData and giftData[itemName]
+									)
+								end
 							end
 							if type(item) == "table" and item.Product then
 								addShopItem(item.Product, depth + 1)
@@ -7039,6 +7321,43 @@ do
 						return dashboardConfig
 					end
 
+					local function getDashboardActivity(currentEggName, isHatching)
+						if activeStates.BGSI_Lite_SeasonActive then
+							return "Working on a seasonal quest", "quest"
+						end
+						if activeStates.BGSI_Lite_ChallengePassActive then
+							return "Working on a challenge quest", "quest"
+						end
+						if activeStates.BGSI_Lite_GlobalIncentiveActive then
+							return "Working on a global quest", "quest"
+						end
+						if activeStates.BGSI_Lite_GemGenieActive then
+							return "Running Gem Genie", "collect"
+						end
+						if activeStates.BGSI_Lite_TicketPickupActive then
+							return "Collecting Tickets", "collect"
+						end
+						if activeStates.BGSI_Lite_CarnivalPickupActive then
+							return "Collecting Carnival Coins", "collect"
+						end
+						if activeStates.BGSI_Lite_RiftEggActive then
+							return "Working on a rift egg", "quest"
+						end
+						if Config.autoEnchant then
+							return "Maintaining the enchant team", "enchant"
+						end
+						if Config.autoHopLuckEgg and activeStates.BGSI_Lite_LuckEggActive ~= true then
+							return "Searching for a 4x Luck egg", "search"
+						end
+						if isHatching then
+							return "Hatching " .. tostring(currentEggName), "hatch"
+						end
+						if Config.autoClaimPrizes then
+							return "Checking prize milestones", "collect"
+						end
+						return "Idle", "idle"
+					end
+
 					while isCurrentRun() do
 						task.wait(Config.dashboardSyncEnabled and dashboardSyncDelay or 0.85)
 						dashboardEndpoint = tostring(Config.dashboardEndpoint or ""):match("^%s*(.-)%s*$") or ""
@@ -7079,7 +7398,9 @@ do
 							local isHatching = activeStates.BGSI_Lite_IsHatching == true
 							local hatchRate =
 								math.max(0, math.floor(tonumber(activeStates.BGSI_Lite_CurrentHatchRate) or 0))
-							local currentState = currentEggName .. "|" .. tostring(isHatching)
+							local dashboardActivity, dashboardActivityLevel =
+								getDashboardActivity(currentEggName, isHatching)
+							local currentState = dashboardActivity .. "|" .. dashboardActivityLevel
 							local currentInventory
 							local inventorySignature
 							local includeInventory = false
@@ -7108,7 +7429,7 @@ do
 								userId = tostring(LocalPlayer.UserId),
 								username = LocalPlayer.Name,
 								displayName = LocalPlayer.DisplayName,
-								status = "in-game",
+								status = dashboardActivity,
 								gameName = tostring(game.Name),
 								placeId = tostring(game.PlaceId),
 								jobId = tostring(game.JobId),
@@ -7174,9 +7495,8 @@ do
 									activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature
 							end
 							if currentState ~= lastDashboardState then
-								payload.log = isHatching
-										and ("Hatching " .. currentEggName .. " at " .. tostring(hatchRate) .. "/m")
-									or "Hatching idle"
+								payload.log = dashboardActivity
+								payload.logLevel = dashboardActivityLevel
 								lastDashboardState = currentState
 							end
 
@@ -8920,6 +9240,17 @@ do
 			saveConfig()
 		end,
 	})
+	scriptStateUC:AddInput("QuestStallTimeout", {
+		Title = "Quest No-Progress Timeout",
+		Description = "Moves to another quest task when progress has not changed for this many seconds (30-300).",
+		Default = tostring(math.clamp(tonumber(Config.questStallTimeoutSeconds) or 60, 30, 300)),
+		Numeric = true,
+		Callback = function(timeoutText)
+			Config.questStallTimeoutSeconds = math.clamp(tonumber(timeoutText) or 60, 30, 300)
+			activeStates.BGSI_Lite_QuestNoProgressTimeout = Config.questStallTimeoutSeconds
+			saveConfig()
+		end,
+	})
 	scriptStateUC:AddSection("Collection Teams")
 	local ticketTeamDropdown
 	local pearlTeamDropdown
@@ -9383,6 +9714,7 @@ task.spawn(function()
 						type(taskRequirement) == "number"
 						and taskProgress < taskRequirement
 						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(challengeTask)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(challengeQuest, taskIndex)
 					then
 						local shouldContinueChallengePass = function()
 							return Config.autoChallengePassQuests == true
@@ -9616,7 +9948,11 @@ task.spawn(function()
 			if type(scriptStateWX) == "table" then
 				local scriptStateGT = getBountyTaskRequirement(scriptStateWX)
 				local scriptStateJI = getBountyTaskProgress(scriptStateMU, scriptStateBJ)
-				if scriptStateJI < scriptStateGT and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateWX) then
+				if
+					scriptStateJI < scriptStateGT
+					and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateWX)
+					and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateMU, scriptStateBJ)
+				then
 					local fallbackUtilityD = function()
 						return Config.autoGemGenie == true
 					end
@@ -9783,7 +10119,11 @@ task.spawn(function()
 				if type(scriptStateDY) == "table" then
 					local scriptStateADS = getBountyTaskRequirement(scriptStateDY)
 					local scriptStateTP = getBountyTaskProgress(scriptStateZC, scriptStateAC)
-					if scriptStateTP < scriptStateADS and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateDY) then
+					if
+						scriptStateTP < scriptStateADS
+						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateDY)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateZC, scriptStateAC)
+					then
 						local fallbackUtilityA = function()
 							return Config.autoDailyHourlyChallenge and not activeStates.BGSI_Lite_GemGenieActive
 						end
@@ -9948,7 +10288,11 @@ task.spawn(function()
 				if type(scriptStateAFI) == "table" then
 					local scriptStateSF = getBountyTaskRequirement(scriptStateAFI)
 					local scriptStateR = getBountyTaskProgress(scriptStateVX, scriptStateADB)
-					if scriptStateR < scriptStateSF and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateAFI) then
+					if
+						scriptStateR < scriptStateSF
+						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateAFI)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateVX, scriptStateADB)
+					then
 						local fallbackUtilityC = function()
 							return Config.autoGlobalIncentive
 								and not activeStates.BGSI_Lite_GemGenieActive
