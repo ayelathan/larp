@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.21.20"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.21.21"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -6768,6 +6768,10 @@ do
 			end
 		end
 	end)
+	activeStates.BGSI_Lite_SafeDashboardBuild = function(builder, fallbackValue)
+		local buildOk, builtValue = pcall(builder)
+		return buildOk and type(builtValue) == "table" and builtValue or fallbackValue
+	end
 	task.spawn(function()
 		local dashboardEndpoint = tostring(Config.dashboardEndpoint or "")
 		local dashboardIngestToken = tostring(Config.dashboardIngestToken or "")
@@ -6830,12 +6834,12 @@ do
 			local httpTable = rawget(activeStates, "http")
 			dashboardRequest = type(httpTable) == "table" and rawget(httpTable, "request") or nil
 		end
-		local lastInventorySync = 0
-		activeStates.BGSI_Lite_DashboardPlayerDetailsSync = 0
+		local lastInventorySync = tick() - 110 + (LocalPlayer.UserId % 20)
+		activeStates.BGSI_Lite_DashboardPlayerDetailsSync = tick() - 50 + (LocalPlayer.UserId % 15)
 		local lastDashboardState
 		local dashboardConnected
 		local dashboardFailureLogAt = 0
-		local dashboardSyncDelay = 1
+		local dashboardSyncDelay = 1 + ((LocalPlayer.UserId % 100) / 100)
 		local pendingDashboardCommandResults = {}
 		local carriedReloadConfirmation = activeStates.BGSI_Lite_PendingReloadConfirmation
 		if type(carriedReloadConfirmation) == "table" and tonumber(carriedReloadConfirmation.id) then
@@ -7736,8 +7740,8 @@ do
 									)
 								end
 								dashboardConnected = false
-								dashboardSyncDelay = math.min(120, dashboardSyncDelay * 2)
-								return
+								dashboardSyncDelay = math.min(12, math.max(3, dashboardSyncDelay * 2))
+								continue
 							end
 
 							local currentEggName = tostring(activeStates.BGSI_Lite_CurrentEggName or "None")
@@ -7758,23 +7762,32 @@ do
 							local currentInventory
 							local inventorySignature
 							local includeInventory = false
-							if dashboardInventoryEnabled
-								and (lastInventorySignature == nil or lastInventorySync <= 0 or tick() - lastInventorySync >= 120)
+							if dashboardInventoryEnabled and tick() - lastInventorySync >= 120
 							then
-								currentInventory = buildDashboardInventory()
-								inventorySignature = HttpService:JSONEncode(currentInventory)
-								includeInventory = inventorySignature ~= lastInventorySignature
-									or tick() - lastInventorySync >= 120
+								currentInventory = activeStates.BGSI_Lite_SafeDashboardBuild(buildDashboardInventory)
+								if currentInventory then
+									inventorySignature = HttpService:JSONEncode(currentInventory)
+									includeInventory = inventorySignature ~= lastInventorySignature
+										or tick() - lastInventorySync >= 120
+								else
+									lastInventorySync = tick()
+								end
 							end
 							activeStates.BGSI_Lite_DashboardIncludePlayerDetails = false
-							if activeStates.BGSI_Lite_DashboardPlayerDetailsSignature == nil
-								or activeStates.BGSI_Lite_DashboardPlayerDetailsSync <= 0
-								or tick() - activeStates.BGSI_Lite_DashboardPlayerDetailsSync >= 60
+							if tick() - activeStates.BGSI_Lite_DashboardPlayerDetailsSync >= 60
 							then
-								activeStates.BGSI_Lite_DashboardPlayerDetails = activeStates.BGSI_Lite_BuildDashboardPlayerDetails()
-								activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature = activeStates.BGSI_Lite_DashboardPlayerDetails
-									and HttpService:JSONEncode(activeStates.BGSI_Lite_DashboardPlayerDetails)
-								activeStates.BGSI_Lite_DashboardIncludePlayerDetails = activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature ~= nil
+								activeStates.BGSI_Lite_DashboardPlayerDetails = activeStates.BGSI_Lite_SafeDashboardBuild(
+									activeStates.BGSI_Lite_BuildDashboardPlayerDetails,
+									nil
+								)
+								if activeStates.BGSI_Lite_DashboardPlayerDetails then
+									activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature = HttpService:JSONEncode(
+										activeStates.BGSI_Lite_DashboardPlayerDetails
+									)
+									activeStates.BGSI_Lite_DashboardIncludePlayerDetails = true
+								else
+									activeStates.BGSI_Lite_DashboardPlayerDetailsSync = tick()
+								end
 							end
 							local pendingDashboardHatches = activeStates.BGSI_Lite_DashboardPendingHatches
 							local sentDashboardHatchCount = math.min(#pendingDashboardHatches, 100)
@@ -7804,8 +7817,8 @@ do
 								luckEggName = activeStates.BGSI_Lite_FindLuckEggName
 										and activeStates.BGSI_Lite_FindLuckEggName()
 									or nil,
-								serverPlayers = buildDashboardServerPlayers(),
-								config = buildDashboardConfig(),
+								serverPlayers = activeStates.BGSI_Lite_SafeDashboardBuild(buildDashboardServerPlayers, {}),
+								config = activeStates.BGSI_Lite_SafeDashboardBuild(buildDashboardConfig, {}),
 							}
 							if type(activeQuest) == "table" then
 								payload.activeQuest = {
@@ -7897,6 +7910,7 @@ do
 									["X-Larplite-Protocol"] = "2",
 								},
 								Body = encodedPayload,
+								Timeout = 15,
 							})
 							local statusCode = requestOk
 									and type(response) == "table"
@@ -7915,7 +7929,8 @@ do
 								and type(responsePayload) == "table"
 								and responsePayload.ok == true
 							if syncSucceeded then
-								dashboardSyncDelay = math.max(2, tonumber(responsePayload.heartbeatSeconds) or 3)
+								dashboardSyncDelay = math.max(3, tonumber(responsePayload.heartbeatSeconds) or 5)
+									+ ((LocalPlayer.UserId % 100) / 100)
 								if not dashboardConnected then
 									print("[" .. LocalPlayer.Name .. "] Account Dashboard connected.")
 								end
@@ -8402,21 +8417,21 @@ do
 								end
 								dashboardConnected = false
 								if statusCode == 401 or statusCode == 403 then
-									dashboardSyncDelay = 60
+									dashboardSyncDelay = 12
 								elseif statusCode == 404 then
-									dashboardSyncDelay = 30
+									dashboardSyncDelay = 12
 								elseif statusCode == 413 then
 									dashboardInventoryEnabled = false
 									dashboardSyncDelay = 5
 								else
-									dashboardSyncDelay = math.min(120, math.max(5, dashboardSyncDelay * 2))
+									dashboardSyncDelay = math.min(12, math.max(3, dashboardSyncDelay * 2))
 								end
 								if includeInventory then
-									lastInventorySync = 0
+									lastInventorySync = tick() - 105
 									lastInventorySignature = nil
 								end
 								if payload.playerDetails then
-									activeStates.BGSI_Lite_DashboardPlayerDetailsSync = 0
+									activeStates.BGSI_Lite_DashboardPlayerDetailsSync = tick() - 45
 									activeStates.BGSI_Lite_DashboardPlayerDetailsSignature = nil
 								end
 							end
@@ -8429,7 +8444,7 @@ do
 				end)
 				if not dashboardWorkerOk then
 					dashboardConnected = false
-					dashboardSyncDelay = math.min(120, math.max(5, dashboardSyncDelay * 2))
+					dashboardSyncDelay = math.min(12, math.max(3, dashboardSyncDelay * 2))
 					if tick() - dashboardFailureLogAt >= 10 then
 						print(
 							"["
