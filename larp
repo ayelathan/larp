@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.13"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.14"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -1047,6 +1047,7 @@ end
 activeStates.BGSI_Lite_QuestNoProgressTimeout = math.clamp(tonumber(Config.questStallTimeoutSeconds) or 60, 30, 300)
 activeStates.BGSI_Lite_QuestStallRetryDelay = 120
 activeStates.BGSI_Lite_StalledQuestTasks = activeStates.BGSI_Lite_StalledQuestTasks or {}
+activeStates.BGSI_Lite_ActiveQuest = nil
 
 activeStates.BGSI_Lite_GetQuestTaskKey = function(questData, taskIndex)
 	local questId = type(questData) == "table"
@@ -1056,6 +1057,81 @@ activeStates.BGSI_Lite_GetQuestTaskKey = function(questData, taskIndex)
 	local taskId = type(questTask) == "table"
 		and (questTask.Id or questTask.ID or questTask.Name or questTask.Type)
 	return tostring(questId or "quest") .. ":" .. tostring(taskIndex) .. ":" .. tostring(taskId or "task")
+end
+
+activeStates.BGSI_Lite_SetActiveQuest = function(questData, taskIndex, progress, state)
+	if type(questData) ~= "table" then
+		return
+	end
+	local questTask = type(questData.Tasks) == "table" and questData.Tasks[taskIndex]
+	if type(questTask) ~= "table" then
+		return
+	end
+	local requirement = math.max(0, tonumber(getBountyTaskRequirement(questTask)) or 0)
+	progress = math.max(0, tonumber(progress) or getBountyTaskProgress(questData, taskIndex))
+	local taskKey = activeStates.BGSI_Lite_GetQuestTaskKey(questData, taskIndex)
+	local currentQuest = activeStates.BGSI_Lite_ActiveQuest
+	if type(currentQuest) == "table" and currentQuest.taskKey == taskKey then
+		currentQuest.progress = progress
+		currentQuest.requirement = requirement
+		currentQuest.state = state or (requirement > 0 and progress >= requirement and "complete" or "active")
+		currentQuest.updatedAt = os.time()
+		return
+	end
+	local questId = tostring(questData.Id or questData.ID or questData.Name or "quest")
+	local taskId = tostring(questTask.Id or questTask.ID or questTask.Name or questTask.Type or taskIndex)
+	local title = tostring(questTask.Title or questTask.Name or questTask.Description or questTask.Type or "Quest task")
+	if questModule and type(questModule.FormatTask) == "function" then
+		local formattedOk, formattedTitle = pcall(function()
+			return questModule:FormatTask(questTask)
+		end)
+		if formattedOk and type(formattedTitle) == "string" and formattedTitle ~= "" then
+			title = formattedTitle
+		end
+	end
+	title = title:gsub("<.->", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+	local loweredQuestId = string.lower(questId)
+	local questKind = "quest"
+	if string.find(loweredQuestId, "gem%-genie") then
+		questKind = "gem-genie"
+	elseif string.find(loweredQuestId, "daily%-challenge") or string.find(loweredQuestId, "hourly%-challenge") then
+		questKind = "season"
+	elseif string.find(loweredQuestId, "global%-incentive") then
+		questKind = "global"
+	elseif string.find(loweredQuestId, "bubble%-challenge") then
+		questKind = "challenge"
+	end
+	activeStates.BGSI_Lite_ActiveQuest = {
+		kind = questKind,
+		id = questId .. ":" .. taskId,
+		title = title,
+		progress = progress,
+		requirement = requirement,
+		state = state or (requirement > 0 and progress >= requirement and "complete" or "active"),
+		updatedAt = os.time(),
+		taskKey = taskKey,
+	}
+end
+
+activeStates.BGSI_Lite_ClearActiveQuest = function(questData, taskIndex)
+	local activeQuest = activeStates.BGSI_Lite_ActiveQuest
+	if type(activeQuest) ~= "table" then
+		return
+	end
+	if questData and taskIndex and activeQuest.taskKey ~= activeStates.BGSI_Lite_GetQuestTaskKey(questData, taskIndex) then
+		return
+	end
+	if activeQuest.state == "stalled" then
+		local stalledTaskKey = activeQuest.taskKey
+		task.delay(15, function()
+			local currentQuest = activeStates.BGSI_Lite_ActiveQuest
+			if type(currentQuest) == "table" and currentQuest.taskKey == stalledTaskKey then
+				activeStates.BGSI_Lite_ActiveQuest = nil
+			end
+		end)
+		return
+	end
+	activeStates.BGSI_Lite_ActiveQuest = nil
 end
 
 activeStates.BGSI_Lite_IsQuestTaskDeferred = function(questData, taskIndex)
@@ -1079,6 +1155,7 @@ activeStates.BGSI_Lite_RecordQuestProgress = function(watchState, questData, tas
 		300
 	)
 	progress = tonumber(progress) or 0
+	activeStates.BGSI_Lite_SetActiveQuest(questData, taskIndex, progress, "active")
 	if type(watchState) ~= "table" then
 		watchState = { Progress = progress, ChangedAt = tick() }
 	elseif progress > (tonumber(watchState.Progress) or 0) then
@@ -1093,6 +1170,7 @@ activeStates.BGSI_Lite_RecordQuestProgress = function(watchState, questData, tas
 		Progress = progress,
 		RetryAt = tick() + activeStates.BGSI_Lite_QuestStallRetryDelay,
 	}
+	activeStates.BGSI_Lite_SetActiveQuest(questData, taskIndex, progress, "stalled")
 	if string.find(string.lower(taskKey), "gem-genie", 1, true) then
 		pcall(function()
 			remoteEvent:FireServer("RerollGenie")
@@ -1308,6 +1386,7 @@ activeStates.BGSI_Lite_HasActionableUnfinishedQuestTask = function(scriptStateQu
 		if
 			type(questTask) == "table"
 			and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(questTask)
+			and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateQuest, taskIndex)
 			and getBountyTaskProgress(scriptStateQuest, taskIndex) < getBountyTaskRequirement(questTask)
 		then
 			return true
@@ -1606,12 +1685,14 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
 	local scriptStateUA = 0
 	local questProgressWatch
 	local scriptStateStalled
+	local activeQuestData
 	while scriptStateAAJ() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateVL = scriptStateWT()
 		if not scriptStateVL then
 			break
 		end
+		activeQuestData = scriptStateVL
 		local scriptStateIF = scriptStateVL.Tasks and scriptStateVL.Tasks[scriptStateI]
 		local scriptStateVR = scriptStateDF
 		if scriptStateIF then
@@ -1625,6 +1706,7 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
 			scriptStateSP
 		)
 		if scriptStateStalled then
+			activeStates.BGSI_Lite_ClearActiveQuest(scriptStateVL, scriptStateI)
 			return false, "NoProgress"
 		end
 		if type(scriptStateVR) == "number" and scriptStateSP >= scriptStateVR then
@@ -1637,7 +1719,7 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
 			break
 		end
 		local scriptStateYV = getBountyEggName(scriptStateIF or {})
-		if tick() - scriptStateUA >= 1 then
+		if tick() - scriptStateUA >= 3 then
 			pcall(function()
 				teleportToEggByName(scriptStateYV)
 			end)
@@ -1648,6 +1730,7 @@ local function runHatchBountyTask(scriptStateWT, scriptStateI, scriptStateDF, sc
 		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
 		task.wait(0.1)
 	end
+	activeStates.BGSI_Lite_ClearActiveQuest(activeQuestData, scriptStateI)
 end
 activeStates.BGSI_Lite_SellBubble = function()
 	pcall(function()
@@ -1667,12 +1750,14 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
 	local lastSellTime = 0
 	local questProgressWatch
 	local scriptStateStalled
+	local activeQuestData
 	while scriptStateFF() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateABM = scriptStateIO()
 		if not scriptStateABM then
 			break
 		end
+		activeQuestData = scriptStateABM
 		local selectedPotionCallback = scriptStateABM.Tasks and scriptStateABM.Tasks[scriptStatePW]
 		local bountyRequirement = scriptStateKN
 		if selectedPotionCallback then
@@ -1687,6 +1772,7 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
 		)
 		if scriptStateStalled then
 			activeStates.BGSI_Lite_SellBubble()
+			activeStates.BGSI_Lite_ClearActiveQuest(scriptStateABM, scriptStatePW)
 			return false, "NoProgress"
 		end
 		if type(bountyRequirement) == "number" and bountyProgress >= bountyRequirement then
@@ -1710,6 +1796,7 @@ local function runBubbleBountyTask(scriptStateIO, scriptStatePW, scriptStateKN, 
 		end)
 		task.wait(0.08)
 	end
+	activeStates.BGSI_Lite_ClearActiveQuest(activeQuestData, scriptStatePW)
 end
 
 do
@@ -2495,6 +2582,7 @@ do
 		teleportToCFrame(ticketFarmCFrame)
 		local scriptStateLastTeleport = 0
 		local questProgressWatch
+		local activeQuestData
 		pcall(function()
 			while scriptStateShouldContinue() do
 				activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
@@ -2502,6 +2590,7 @@ do
 				if not scriptStateQuest then
 					break
 				end
+				activeQuestData = scriptStateQuest
 				local scriptStateTask = scriptStateQuest.Tasks and scriptStateQuest.Tasks[scriptStateTaskIndex]
 				local scriptStateNeeded = scriptStateTask and getBountyTaskRequirement(scriptStateTask)
 					or scriptStateRequirement
@@ -2531,6 +2620,7 @@ do
 				task.wait(0.1)
 			end
 		end)
+		activeStates.BGSI_Lite_ClearActiveQuest(activeQuestData, scriptStateTaskIndex)
 		activeStates.BGSI_Lite_TicketPickupActive = false
 		equipReturnPetTeam(Config.selectedTicketReturnTeam, scriptStatePreviousTeam)
 		ticketPickupTaskRunning = false
@@ -2567,6 +2657,7 @@ do
 		end
 		teleportToCFrame(pearlFarmCFrame)
 		local questProgressWatch
+		local activeQuestData
 		pcall(function()
 			while scriptStateShouldContinue() do
 				activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
@@ -2574,6 +2665,7 @@ do
 				if not scriptStateQuest then
 					break
 				end
+				activeQuestData = scriptStateQuest
 				local scriptStateTask = scriptStateQuest.Tasks and scriptStateQuest.Tasks[scriptStateTaskIndex]
 				local scriptStateNeeded = scriptStateTask and getBountyTaskRequirement(scriptStateTask)
 					or scriptStateRequirement
@@ -2615,6 +2707,7 @@ do
 				task.wait(math.clamp(tonumber(Config.autoOpenMysteryDelay) or 0.2, 0.1, 2))
 			end
 		end)
+		activeStates.BGSI_Lite_ClearActiveQuest(activeQuestData, scriptStateTaskIndex)
 		equipReturnPetTeam(Config.selectedPearlReturnTeam, scriptStatePreviousTeam)
 		pearlPickupTaskRunning = false
 	end
@@ -2635,12 +2728,14 @@ local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, script
 	local shopItemLoopCount = 0
 	local scriptStateSK = tick()
 	local questProgressWatch
+	local activeQuestData
 	while scriptStateSS() do
 		activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 		local scriptStateBL = scriptStateSM()
 		if not scriptStateBL then
 			break
 		end
+		activeQuestData = scriptStateBL
 		local scriptStateYF = scriptStateBL.Tasks and scriptStateBL.Tasks[scriptStateOX]
 		local scriptStateAP = scriptStateMZ
 		if scriptStateYF then
@@ -2655,6 +2750,7 @@ local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, script
 			scriptStateUX
 		)
 		if scriptStateStalled then
+			activeStates.BGSI_Lite_ClearActiveQuest(scriptStateBL, scriptStateOX)
 			return false, "NoProgress"
 		end
 		if type(scriptStateAP) == "number" and scriptStateUX >= scriptStateAP then
@@ -2689,6 +2785,68 @@ local function runCollectCurrencyBountyTask(scriptStateSM, scriptStateOX, script
 		end
 		task.wait(1.2)
 	end
+	activeStates.BGSI_Lite_ClearActiveQuest(activeQuestData, scriptStateOX)
+end
+
+-- One guarded dispatch path is shared by every quest source. This keeps completed,
+-- deferred and unsupported tasks from repeatedly teleporting or firing remotes.
+activeStates.BGSI_Lite_RunQuestTask = function(getQuest, taskIndex, fallbackRequirement, shouldContinue)
+	if type(getQuest) ~= "function" or type(shouldContinue) ~= "function" or not shouldContinue() then
+		return false, "Stopped"
+	end
+	local questData = getQuest()
+	local questTask = type(questData) == "table" and type(questData.Tasks) == "table"
+		and questData.Tasks[taskIndex]
+	if type(questTask) ~= "table" then
+		return false, "MissingTask"
+	end
+	local requirement = tonumber(getBountyTaskRequirement(questTask)) or tonumber(fallbackRequirement) or 1
+	local progress = getBountyTaskProgress(questData, taskIndex)
+	if questData.Completed == true or questTask.Completed == true or progress >= requirement then
+		activeStates.BGSI_Lite_ClearActiveQuest(questData, taskIndex)
+		return false, "Completed"
+	end
+	if activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(questTask) then
+		return false, "Skipped"
+	end
+	if activeStates.BGSI_Lite_IsQuestTaskDeferred(questData, taskIndex) then
+		return false, "Deferred"
+	end
+
+	local handler
+	local currencyName
+	if isCoinOrCollectBountyTask(questTask) then
+		handler = runCollectCurrencyBountyTask
+		currencyName = getBountyCurrencyName(questTask)
+	elseif isHatchBountyTask(questTask) then
+		handler = runHatchBountyTask
+	elseif isBubbleBountyTask(questTask) then
+		handler = runBubbleBountyTask
+	end
+	if not handler then
+		local taskKey = activeStates.BGSI_Lite_GetQuestTaskKey(questData, taskIndex)
+		if type(activeStates.BGSI_Lite_StalledQuestTasks[taskKey]) ~= "table" then
+			warn("[1rzHub Lite] Unsupported quest task deferred:", taskKey)
+		end
+		activeStates.BGSI_Lite_StalledQuestTasks[taskKey] = {
+			Progress = progress,
+			RetryAt = tick() + 300,
+		}
+		return false, "Unsupported"
+	end
+
+	local ok, result, reason
+	if handler == runCollectCurrencyBountyTask then
+		ok, result, reason = pcall(handler, getQuest, taskIndex, requirement, shouldContinue, currencyName)
+	else
+		ok, result, reason = pcall(handler, getQuest, taskIndex, requirement, shouldContinue)
+	end
+	if not ok then
+		activeStates.BGSI_Lite_ClearActiveQuest(questData, taskIndex)
+		warn("[1rzHub Lite] Quest task handler failed:", tostring(result))
+		return false, "HandlerError"
+	end
+	return result, reason
 end
 activeStates.BGSI_Lite_GemGenieActive = false
 activeStates.BGSI_Lite_SeasonActive = false
@@ -2725,6 +2883,9 @@ local function clearDisabledPriorityStates()
 	end
 	if activeStates.BGSI_Lite_SpecialRiftActive and Config.autoSpecialRift ~= true then
 		activeStates.BGSI_Lite_SpecialRiftActive = false
+	end
+	if not isPriorityAutomationActive() then
+		activeStates.BGSI_Lite_ClearActiveQuest()
 	end
 end
 local scriptStateGV, scriptStateSR = nil, nil
@@ -7344,6 +7505,15 @@ do
 					end
 
 					local function getDashboardActivity(currentEggName, isHatching)
+						local activeQuest = activeStates.BGSI_Lite_ActiveQuest
+						if type(activeQuest) == "table" and activeQuest.state ~= "complete" then
+							local progress = math.max(0, tonumber(activeQuest.progress) or 0)
+							local requirement = math.max(0, tonumber(activeQuest.requirement) or 0)
+							local progressText = requirement > 0
+								and (" (" .. tostring(math.floor(progress)) .. "/" .. tostring(math.floor(requirement)) .. ")")
+								or ""
+							return tostring(activeQuest.title or "Working on a quest") .. progressText, "quest"
+						end
 						if activeStates.BGSI_Lite_SeasonActive then
 							return "Working on a seasonal quest", "quest"
 						end
@@ -7422,7 +7592,15 @@ do
 								math.max(0, math.floor(tonumber(activeStates.BGSI_Lite_CurrentHatchRate) or 0))
 							local dashboardActivity, dashboardActivityLevel =
 								getDashboardActivity(currentEggName, isHatching)
-							local currentState = dashboardActivity .. "|" .. dashboardActivityLevel
+							local activeQuest = activeStates.BGSI_Lite_ActiveQuest
+							local currentState = type(activeQuest) == "table"
+								and table.concat({
+									"quest",
+									tostring(activeQuest.kind or "quest"),
+									tostring(activeQuest.id or ""),
+									tostring(activeQuest.state or "active"),
+								}, "|")
+								or dashboardActivity .. "|" .. dashboardActivityLevel
 							local currentInventory
 							local inventorySignature
 							local includeInventory = false
@@ -7472,6 +7650,16 @@ do
 								serverPlayers = buildDashboardServerPlayers(),
 								config = buildDashboardConfig(),
 							}
+							if type(activeQuest) == "table" then
+								payload.activeQuest = {
+									kind = tostring(activeQuest.kind or "quest"),
+									id = tostring(activeQuest.id or ""),
+									title = tostring(activeQuest.title or "Quest task"),
+									progress = math.max(0, tonumber(activeQuest.progress) or 0),
+									requirement = math.max(0, tonumber(activeQuest.requirement) or 0),
+									state = tostring(activeQuest.state or "active"),
+								}
+							end
 							if sentDashboardHatchCount > 0 then
 								payload.hatches = {}
 								for hatchIndex = 1, sentDashboardHatchCount do
@@ -9558,6 +9746,7 @@ activeStates.HasUnfinishedChallengePassQuest = function(challengeQuestList)
 						type(taskRequirement) == "number"
 						and taskProgress < taskRequirement
 						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(challengeTask)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(challengeQuest, taskIndex)
 					then
 						return true
 					end
@@ -9773,34 +9962,12 @@ task.spawn(function()
 						local getChallengeQuest = function()
 							return activeStates.GetChallengePassQuestById(challengeQuestId)
 						end
-						if isCoinOrCollectBountyTask(challengeTask) then
-							pcall(
-								runCollectCurrencyBountyTask,
-								getChallengeQuest,
-								taskIndex,
-								taskRequirement,
-								shouldContinueChallengePass,
-								getBountyCurrencyName(challengeTask)
-							)
-						elseif isHatchBountyTask(challengeTask) then
-							pcall(
-								runHatchBountyTask,
-								getChallengeQuest,
-								taskIndex,
-								taskRequirement,
-								shouldContinueChallengePass
-							)
-						elseif isBubbleBountyTask(challengeTask) then
-							pcall(
-								runBubbleBountyTask,
-								getChallengeQuest,
-								taskIndex,
-								taskRequirement,
-								shouldContinueChallengePass
-							)
-						else
-							task.wait(0.1)
-						end
+						activeStates.BGSI_Lite_RunQuestTask(
+							getChallengeQuest,
+							taskIndex,
+							taskRequirement,
+							shouldContinueChallengePass
+						)
 					end
 				end
 			end
@@ -10007,22 +10174,12 @@ task.spawn(function()
 					local fallbackUtilityB = function()
 						return getGemGenieQuestData()
 					end
-					if isCoinOrCollectBountyTask(scriptStateWX) then
-						pcall(
-							runCollectCurrencyBountyTask,
-							fallbackUtilityB,
-							scriptStateBJ,
-							scriptStateGT,
-							fallbackUtilityD,
-							getBountyCurrencyName(scriptStateWX)
-						)
-					elseif isHatchBountyTask(scriptStateWX) then
-						pcall(runHatchBountyTask, fallbackUtilityB, scriptStateBJ, scriptStateGT, fallbackUtilityD)
-					elseif isBubbleBountyTask(scriptStateWX) then
-						pcall(runBubbleBountyTask, fallbackUtilityB, scriptStateBJ, scriptStateGT, fallbackUtilityD)
-					else
-						task.wait(0.08)
-					end
+					activeStates.BGSI_Lite_RunQuestTask(
+						fallbackUtilityB,
+						scriptStateBJ,
+						scriptStateGT,
+						fallbackUtilityD
+					)
 				end
 			end
 		end
@@ -10129,7 +10286,10 @@ task.spawn(function()
 				if type(scriptStateWO) == "table" then
 					local scriptStateCW = getBountyTaskRequirement(scriptStateWO)
 					local scriptStateUP = getBountyTaskProgress(scriptStateAAE, scriptStateTB)
-					if scriptStateUP < scriptStateCW and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateWO) then
+					if scriptStateUP < scriptStateCW
+						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateWO)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateAAE, scriptStateTB)
+					then
 						scriptStateWQ = true
 						break
 					end
@@ -10178,28 +10338,12 @@ task.spawn(function()
 						local fallbackUtilityG = function()
 							return runSeasonChallengeTask(scriptStateKZ)
 						end
-						if isCoinOrCollectBountyTask(scriptStateDY) then
-							pcall(
-								runCollectCurrencyBountyTask,
-								fallbackUtilityG,
-								scriptStateAC,
-								scriptStateADS,
-								fallbackUtilityA,
-								getBountyCurrencyName(scriptStateDY)
-							)
-						elseif isHatchBountyTask(scriptStateDY) then
-							pcall(runHatchBountyTask, fallbackUtilityG, scriptStateAC, scriptStateADS, fallbackUtilityA)
-						elseif isBubbleBountyTask(scriptStateDY) then
-							pcall(
-								runBubbleBountyTask,
-								fallbackUtilityG,
-								scriptStateAC,
-								scriptStateADS,
-								fallbackUtilityA
-							)
-						else
-							task.wait(0.08)
-						end
+						activeStates.BGSI_Lite_RunQuestTask(
+							fallbackUtilityG,
+							scriptStateAC,
+							scriptStateADS,
+							fallbackUtilityA
+						)
 					end
 				end
 			end
@@ -10298,7 +10442,10 @@ task.spawn(function()
 				if type(scriptStateJA) == "table" then
 					local scriptStateLR = getBountyTaskRequirement(scriptStateJA)
 					local scriptStateGF = getBountyTaskProgress(scriptStateAFT, scriptStateWC)
-					if scriptStateGF < scriptStateLR and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateJA) then
+					if scriptStateGF < scriptStateLR
+						and not activeStates.BGSI_Lite_ShouldSkipTicketOrPearlQuest(scriptStateJA)
+						and not activeStates.BGSI_Lite_IsQuestTaskDeferred(scriptStateAFT, scriptStateWC)
+					then
 						scriptStateRM = true
 						break
 					end
@@ -10349,28 +10496,12 @@ task.spawn(function()
 						local fallbackUtilityF = function()
 							return runGlobalIncentiveTask(scriptStateHW)
 						end
-						if isCoinOrCollectBountyTask(scriptStateAFI) then
-							pcall(
-								runCollectCurrencyBountyTask,
-								fallbackUtilityF,
-								scriptStateADB,
-								scriptStateSF,
-								fallbackUtilityC,
-								getBountyCurrencyName(scriptStateAFI)
-							)
-						elseif isHatchBountyTask(scriptStateAFI) then
-							pcall(runHatchBountyTask, fallbackUtilityF, scriptStateADB, scriptStateSF, fallbackUtilityC)
-						elseif isBubbleBountyTask(scriptStateAFI) then
-							pcall(
-								runBubbleBountyTask,
-								fallbackUtilityF,
-								scriptStateADB,
-								scriptStateSF,
-								fallbackUtilityC
-							)
-						else
-							task.wait(0.5)
-						end
+						activeStates.BGSI_Lite_RunQuestTask(
+							fallbackUtilityF,
+							scriptStateADB,
+							scriptStateSF,
+							fallbackUtilityC
+						)
 					end
 				end
 			end
