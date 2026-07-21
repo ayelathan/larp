@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.14"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.16"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -99,6 +99,12 @@ local defaultConfig = {
 	autoPowerOrbEquipped = false,
 	equippedTargetEnchant = "secret-hunter",
 	equippedTargetEnchant2 = "ultra-roller",
+	superLegendaryEnchantPriorities = {
+		"hatch-blessing-plus",
+		"luck-boost-plus",
+		"hatch-blessing",
+		"luck-boost",
+	},
 	equippedTargetEnchantLevel = 0,
 	equippedEnchantCurrency = "Auto (Secret = Crystals,Normal = Gems)",
 	autoPlaytime = false,
@@ -6876,6 +6882,7 @@ do
 			"autoEnchant",
 			"equippedTargetEnchant",
 			"equippedTargetEnchant2",
+			"superLegendaryEnchantPriorities",
 			"equippedTargetEnchantLevel",
 			"equippedEnchantCurrency",
 			"gemGenieTargetItem",
@@ -7152,16 +7159,16 @@ do
 							table.insert(details.configOptions[configKey], option)
 						end
 
-						for eggName in pairs(getEggDataLookup()) do
-							addConfigOption("selectedEgg", eggName)
+						for eggName, eggInfo in pairs(getEggDataLookup()) do
+							addConfigOption("selectedEgg", eggName, eggName, eggInfo)
 						end
 						addConfigOption("selectedEgg", activeStates.BGSI_Lite_CurrentEggName)
 						addConfigOption("selectedEgg", activeStates.BGSI_Lite_LuckEggName)
 						for riftName, riftInfo in pairs(type(riftData) == "table" and riftData or {}) do
 							if type(riftInfo) == "table" and riftInfo.Type == "Egg" then
-								addConfigOption("selectedRiftEgg", riftName)
+								addConfigOption("selectedRiftEgg", riftName, riftName, riftInfo)
 							elseif type(riftInfo) == "table" and riftInfo.Type == "Chest" then
-								addConfigOption("selectedChest", riftName)
+								addConfigOption("selectedChest", riftName, riftName, riftInfo)
 							end
 						end
 						local rendered = Workspace:FindFirstChild("Rendered")
@@ -7172,24 +7179,47 @@ do
 						local chestData = safeRequireTable(function()
 							return require(ReplicatedStorage.Shared.Data.Chests)
 						end) or {}
-						for chestName in pairs(chestData) do
-							addConfigOption("selectedWorldChest", chestName)
+						for chestName, chestInfo in pairs(chestData) do
+							addConfigOption("selectedWorldChest", chestName, chestName, chestInfo)
 						end
 						for _, chestName in ipairs({ "Giant Chest", "Infinity Chest", "Ticket Chest", "Void Chest" }) do
 							addConfigOption("selectedWorldChest", chestName)
 						end
-						for enchantName in pairs(type(enchantData) == "table" and enchantData or {}) do
+						for enchantName, enchantInfo in pairs(type(enchantData) == "table" and enchantData or {}) do
 							if type(enchantName) == "string" and not string.lower(enchantName):find("^super%-") then
-								addConfigOption("equippedTargetEnchant", enchantName)
-								addConfigOption("equippedTargetEnchant2", enchantName)
+								addConfigOption("equippedTargetEnchant", enchantName, enchantName, enchantInfo)
+								addConfigOption("equippedTargetEnchant2", enchantName, enchantName, enchantInfo)
 							end
+						end
+						local superEnchantOptions = {
+							{ "hatch-blessing-plus", "Hatch Blessing Plus", "hatchblessing" },
+							{ "luck-boost-plus", "Luck Boost Plus", "luckboost" },
+							{ "hatch-blessing", "Hatch Blessing", "hatchblessing" },
+							{ "luck-boost", "Luck Boost", "luckboost" },
+						}
+						for _, superEnchantOption in ipairs(superEnchantOptions) do
+							local optionData
+							for enchantName, enchantInfo in pairs(type(enchantData) == "table" and enchantData or {}) do
+								if type(enchantName) == "string"
+									and string.lower(enchantName):gsub("[%s_%-]", "") == superEnchantOption[3]
+								then
+									optionData = enchantInfo
+									break
+								end
+							end
+							addConfigOption(
+								"superLegendaryEnchantPriorities",
+								superEnchantOption[1],
+								superEnchantOption[2],
+								optionData
+							)
 						end
 						addConfigOption("equippedTargetEnchant2", "", "None")
 						for potionName, potion in pairs(type(potionData) == "table" and potionData or {}) do
 							if type(potionName) == "string" and type(potion) == "table" then
-								addConfigOption("potionType", potionName)
-								addConfigOption("shrinePotion", potionName)
-								addConfigOption("gemGenieTargetItem", potionName)
+								addConfigOption("potionType", potionName, potionName, potion)
+								addConfigOption("shrinePotion", potionName, potionName, potion)
+								addConfigOption("gemGenieTargetItem", potionName, potionName, potion)
 							end
 						end
 						for level = 1, 7 do
@@ -7200,9 +7230,9 @@ do
 						end
 						for powerupName, powerup in pairs(type(giftData) == "table" and giftData or {}) do
 							if type(powerupName) == "string" then
-								addConfigOption("gemGenieTargetItem", powerupName)
+								addConfigOption("gemGenieTargetItem", powerupName, powerupName, powerup)
 								if type(powerup) == "table" and powerup.Type == "Gift" then
-									addConfigOption("selectedMysteryBox", powerupName)
+									addConfigOption("selectedMysteryBox", powerupName, powerupName, powerup)
 								elseif type(powerup) == "table" and powerup.Type == "Fragment" then
 									addConfigOption("selectedFragments", powerupName, powerupName, powerup)
 								end
@@ -7216,7 +7246,7 @@ do
 								return
 							end
 							if type(shopItem) == "string" then
-								addConfigOption("selectedShopItems", shopItem)
+								addConfigOption("selectedShopItems", shopItem, shopItem, giftData and giftData[shopItem])
 								if string.find(string.lower(shopItem), "fragment", 1, true) then
 									addConfigOption("selectedFragments", shopItem, shopItem, giftData and giftData[shopItem])
 								end
@@ -7229,13 +7259,17 @@ do
 							local itemName = type(item) == "table" and (item.Name or item.Item or item.ItemName or item.Id)
 								or type(item) == "string" and item
 							if itemName then
-								addConfigOption("selectedShopItems", itemName)
+								local itemOptionData = type(item) == "table" and item or nil
+								if not itemOptionData or not getAssetId(itemOptionData, 0, {}) then
+									itemOptionData = giftData and giftData[itemName]
+								end
+								addConfigOption("selectedShopItems", itemName, itemName, itemOptionData)
 								if string.find(string.lower(tostring(itemName)), "fragment", 1, true) then
 									addConfigOption(
 										"selectedFragments",
 										itemName,
 										itemName,
-										type(item) == "table" and item or giftData and giftData[itemName]
+										itemOptionData
 									)
 								end
 							end
@@ -7257,8 +7291,11 @@ do
 						for _, pet in ipairs(type(playerData.Pets) == "table" and playerData.Pets or {}) do
 							if type(pet) == "table" and type(pet.Name) == "string" and not ownedPetNames[pet.Name] then
 								ownedPetNames[pet.Name] = true
-								addConfigOption("RebirthPetName", pet.Name)
-								addConfigOption("AdminRebirthPetName", pet.Name)
+								local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
+								local petAssetId = activeStates.BGSI_Lite_GetDashboardPetAssetId(pet, petInfo)
+								local petOptionData = petAssetId and { ImageAssetId = petAssetId } or petInfo
+								addConfigOption("RebirthPetName", pet.Name, pet.Name, petOptionData)
+								addConfigOption("AdminRebirthPetName", pet.Name, pet.Name, petOptionData)
 							end
 						end
 						for teamKey, team in pairs(type(playerData.Teams) == "table" and playerData.Teams or {}) do
@@ -7604,21 +7641,24 @@ do
 							local currentInventory
 							local inventorySignature
 							local includeInventory = false
-							if dashboardInventoryEnabled then
+							if dashboardInventoryEnabled
+								and (lastInventorySignature == nil or lastInventorySync <= 0 or tick() - lastInventorySync >= 120)
+							then
 								currentInventory = buildDashboardInventory()
 								inventorySignature = HttpService:JSONEncode(currentInventory)
 								includeInventory = inventorySignature ~= lastInventorySignature
 									or tick() - lastInventorySync >= 120
 							end
-							activeStates.BGSI_Lite_DashboardPlayerDetails = activeStates.BGSI_Lite_BuildDashboardPlayerDetails()
-							activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature = activeStates.BGSI_Lite_DashboardPlayerDetails
-								and HttpService:JSONEncode(activeStates.BGSI_Lite_DashboardPlayerDetails)
-							activeStates.BGSI_Lite_DashboardIncludePlayerDetails = activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature ~= nil
-								and (
-									activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature
-										~= activeStates.BGSI_Lite_DashboardPlayerDetailsSignature
-									or tick() - activeStates.BGSI_Lite_DashboardPlayerDetailsSync >= 60
-								)
+							activeStates.BGSI_Lite_DashboardIncludePlayerDetails = false
+							if activeStates.BGSI_Lite_DashboardPlayerDetailsSignature == nil
+								or activeStates.BGSI_Lite_DashboardPlayerDetailsSync <= 0
+								or tick() - activeStates.BGSI_Lite_DashboardPlayerDetailsSync >= 60
+							then
+								activeStates.BGSI_Lite_DashboardPlayerDetails = activeStates.BGSI_Lite_BuildDashboardPlayerDetails()
+								activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature = activeStates.BGSI_Lite_DashboardPlayerDetails
+									and HttpService:JSONEncode(activeStates.BGSI_Lite_DashboardPlayerDetails)
+								activeStates.BGSI_Lite_DashboardIncludePlayerDetails = activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature ~= nil
+							end
 							local pendingDashboardHatches = activeStates.BGSI_Lite_DashboardPendingHatches
 							local sentDashboardHatchCount = math.min(#pendingDashboardHatches, 100)
 							local dashboardEggDiscoveries = activeStates.BGSI_Lite_DashboardEggDiscoveries
@@ -7758,7 +7798,7 @@ do
 								and type(responsePayload) == "table"
 								and responsePayload.ok == true
 							if syncSucceeded then
-								dashboardSyncDelay = math.max(5, tonumber(responsePayload.heartbeatSeconds) or 10)
+								dashboardSyncDelay = math.max(2, tonumber(responsePayload.heartbeatSeconds) or 3)
 								if not dashboardConnected then
 									print("[" .. LocalPlayer.Name .. "] Account Dashboard connected.")
 								end
@@ -7942,7 +7982,7 @@ do
 												local itemName = tostring(dashboardCommand.itemName or "")
 												local itemLevel = tonumber(dashboardCommand.level)
 												local itemTier = tonumber(dashboardCommand.tier)
-												local quantity = math.clamp(math.floor(tonumber(dashboardCommand.quantity) or 1), 1, 100)
+												local quantity = math.max(1, math.floor(tonumber(dashboardCommand.quantity) or 1))
 												local item = { Type = itemType, Name = itemName, Level = itemLevel, Tier = itemTier }
 												local amountOk, amountBefore = pcall(itemUtil.GetOwnedAmount, itemUtil, playerData, item)
 												amountBefore = amountOk and math.max(0, math.floor(tonumber(amountBefore) or 0)) or 0
@@ -7950,57 +7990,47 @@ do
 													error("The selected item is no longer owned")
 												end
 												quantity = math.min(quantity, amountBefore)
-												if itemType == "Potion" then
-													for _ = 1, quantity do
-														remoteEvent:FireServer("UsePotion", itemName, itemLevel)
-														task.wait(0.1)
-													end
-												elseif itemType == "Rune" then
-													remoteEvent:FireServer("UseRune", itemName, itemTier, quantity)
-												elseif itemType == "Powerup" then
-													local powerup = type(giftData) == "table" and giftData[itemName] or nil
-													if itemName == "Golden Orb" then
-														for _ = 1, quantity do
+												local targetAmount = amountBefore - quantity
+												local updatedAmount = amountBefore
+												local failedAttempts = 0
+												local commandDeadline = tick() + math.clamp(8 + quantity * 0.08, 12, 90)
+												local powerup = type(giftData) == "table" and giftData[itemName] or nil
+												while updatedAmount > targetAmount and tick() < commandDeadline and failedAttempts < 5 do
+													local remaining = updatedAmount - targetAmount
+													if itemType == "Potion" then
+														remoteEvent:FireServer("UsePotion", itemName, itemLevel, remaining)
+													elseif itemType == "Rune" then
+														remoteEvent:FireServer("UseRune", itemName, itemTier, remaining)
+													elseif itemType == "Powerup" and itemName == "Golden Orb" then
+														for _ = 1, math.min(remaining, 25) do
 															remoteEvent:FireServer("UseGoldenOrb")
-															task.wait(0.12)
 														end
-													elseif powerup and powerup.Type == "Fragment" then
+													elseif itemType == "Powerup" and powerup and powerup.Type == "Fragment" then
 														local fragmentType = itemName:gsub(" Fragment$", "")
-														for _ = 1, quantity do
+														for _ = 1, math.min(remaining, 25) do
 															remoteEvent:FireServer("UseFragment", fragmentType)
-															task.wait(0.12)
 														end
-													elseif powerup and powerup.Type == "Gift" then
-														remoteEvent:FireServer("UseGift", itemName, quantity)
-													elseif powerup and powerup.Type == "Egg" then
-														local remaining = quantity
-														while remaining > 0 do
-															local batchSize = math.min(12, remaining)
-															remoteEvent:FireServer("HatchPowerupEgg", itemName, batchSize)
-															remaining = remaining - batchSize
-															task.wait(0.2)
-														end
+													elseif itemType == "Powerup" and powerup and powerup.Type == "Gift" then
+														remoteEvent:FireServer("UseGift", itemName, remaining)
+													elseif itemType == "Powerup" and powerup and powerup.Type == "Egg" then
+														remoteEvent:FireServer("HatchPowerupEgg", itemName, math.min(12, remaining))
 													else
 														error("This item cannot be used from the dashboard")
 													end
-												else
-													error("This item cannot be used from the dashboard")
+
+													local previousAmount = updatedAmount
+													local replicationDeadline = tick() + 2
+													repeat
+														task.wait(0.08)
+														playerData = profileStore:IsReady() and profileStore:Get() or nil
+														local updatedOk, currentAmount = pcall(itemUtil.GetOwnedAmount, itemUtil, playerData, item)
+														if updatedOk then
+															updatedAmount = math.max(0, math.floor(tonumber(currentAmount) or previousAmount))
+														end
+													until updatedAmount < previousAmount or tick() >= replicationDeadline
+													failedAttempts = updatedAmount < previousAmount and 0 or failedAttempts + 1
 												end
-												local requiredDecrease = itemType == "Potion" and quantity or 1
-												local updatedAmount = amountBefore
-												local updateDeadline = tick() + 12
-												repeat
-													task.wait(0.1)
-													playerData = profileStore:IsReady() and profileStore:Get() or nil
-													local updatedOk, currentAmount = pcall(itemUtil.GetOwnedAmount, itemUtil, playerData, item)
-													if updatedOk then
-														updatedAmount = math.max(0, math.floor(tonumber(currentAmount) or amountBefore))
-													end
-													if amountBefore - updatedAmount >= requiredDecrease then
-														return
-													end
-												until tick() >= updateDeadline
-												if itemType == "Potion" and updatedAmount < amountBefore then
+												if updatedAmount > targetAmount then
 													error(
 														"The game only used "
 															.. tostring(amountBefore - updatedAmount)
@@ -8010,7 +8040,6 @@ do
 															.. itemName
 													)
 												end
-												error("The game did not use " .. itemName)
 											end)
 											if commandSucceeded then
 												commandError = nil
@@ -9058,10 +9087,29 @@ local function getEnchantCurrency(scriptStateVC)
 	end
 	return nil
 end
+local function getSuperLegendaryEnchantPriorityKey(enchantEntry)
+	local enchantDisplayName = getWebhookEnchantDisplayName(enchantEntry)
+	local normalizedEnchantName = normalizeEnchantName(enchantDisplayName or enchantEntry.Id):gsub("%+", "plus")
+	local isPlus = normalizedEnchantName:find("plus", 1, true) ~= nil or (tonumber(enchantEntry.Level) or 1) > 1
+	if normalizedEnchantName:find("hatchblessing", 1, true) == 1 then
+		return isPlus and "hatch-blessing-plus" or "hatch-blessing"
+	end
+	if normalizedEnchantName:find("luckboost", 1, true) == 1 then
+		return isPlus and "luck-boost-plus" or "luck-boost"
+	end
+	return nil
+end
 local function prepareAutoEnchantTeam()
 	local playerData = profileStore:IsReady() and profileStore:Get() or nil
 	if type(playerData) ~= "table" or type(playerData.Pets) ~= "table" then
 		return false
+	end
+	local superEnchantPriorities = type(Config.superLegendaryEnchantPriorities) == "table"
+		and Config.superLegendaryEnchantPriorities
+		or {}
+	local superEnchantPriorityIndexes = {}
+	for priorityIndex, enchantKey in ipairs(superEnchantPriorities) do
+		superEnchantPriorityIndexes[tostring(enchantKey)] = priorityIndex
 	end
 	local candidates = {}
 	for _, pet in ipairs(playerData.Pets) do
@@ -9071,15 +9119,10 @@ local function prepareAutoEnchantTeam()
 		local isSuperLegendary = pet.Super == true or pet.IsSuper == true
 		if isSuperLegendary then
 			for _, enchantEntry in ipairs(getSuperLegendaryWebhookEnchantList(pet)) do
-				local enchantDisplayName = getWebhookEnchantDisplayName(enchantEntry)
-				local normalizedEnchantName = normalizeEnchantName(enchantDisplayName or enchantEntry.Id)
-				if
-					normalizedEnchantName:find("luckboost", 1, true) == 1
-					or normalizedEnchantName:find("hatchblessing", 1, true) == 1
-				then
-					local enchantLevel = tonumber(enchantEntry.Level) or 1
-					superEnchantScore += (normalizedEnchantName:find("plus", 1, true) or enchantLevel > 1) and 2
-						or 1
+				local enchantKey = getSuperLegendaryEnchantPriorityKey(enchantEntry)
+				local priorityIndex = enchantKey and superEnchantPriorityIndexes[enchantKey]
+				if priorityIndex then
+					superEnchantScore = math.max(superEnchantScore, #superEnchantPriorities - priorityIndex + 1)
 				end
 			end
 		end
