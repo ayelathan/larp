@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.8"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.20.9"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -8512,25 +8512,25 @@ local function prepareAutoEnchantTeam()
 		local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
 		local rarity = petInfo and petInfo.Rarity
 		local superEnchantScore = 0
-		if pet.Super == true and rarity == "Legendary" then
-			for _, enchantName in ipairs(getPetEnchantList(pet)) do
-				local normalizedEnchantName = normalizeEnchantName(enchantName)
-				if normalizedEnchantName == "luckboost" or normalizedEnchantName == "hatchblessing" then
-					superEnchantScore += 1
-				elseif
-					normalizedEnchantName == "luckboostplus"
-					or normalizedEnchantName == "hatchblessingplus"
-					or normalizedEnchantName == "luckboost+"
-					or normalizedEnchantName == "hatchblessing+"
+		local isSuperLegendary = pet.Super == true or pet.IsSuper == true
+		if isSuperLegendary then
+			for _, enchantEntry in ipairs(getSuperLegendaryWebhookEnchantList(pet)) do
+				local enchantDisplayName = getWebhookEnchantDisplayName(enchantEntry)
+				local normalizedEnchantName = normalizeEnchantName(enchantDisplayName or enchantEntry.Id)
+				if
+					normalizedEnchantName:find("luckboost", 1, true) == 1
+					or normalizedEnchantName:find("hatchblessing", 1, true) == 1
 				then
-					superEnchantScore += 2
+					local enchantLevel = tonumber(enchantEntry.Level) or 1
+					superEnchantScore += (normalizedEnchantName:find("plus", 1, true) or enchantLevel > 1) and 2
+						or 1
 				end
 			end
 		end
 		if
 			superEnchantScore > 0
 			or (
-				pet.Super ~= true
+				not isSuperLegendary
 				and (pet.Shiny == true or pet.IsShiny == true)
 				and (rarity == "Celestial" or rarity == "Secret")
 			)
@@ -8571,7 +8571,7 @@ local function prepareAutoEnchantTeam()
 			break
 		end
 		local petId = tostring(candidate.pet.Id or "")
-		local isSuperLegendary = candidate.pet.Super == true
+		local isSuperLegendary = candidate.pet.Super == true or candidate.pet.IsSuper == true
 		if petId ~= "" and (not isSuperLegendary or selectedSuperCount < maxSupersEquipped) then
 			table.insert(selectedPetIds, petId)
 			selectedPetIdSet[petId] = true
@@ -8655,7 +8655,7 @@ local function getEnchantTargetList()
 					break
 				end
 				local petData = getEnchantCurrency(equippedPetId)
-				if petData and petData.Super ~= true then
+				if petData and petData.Super ~= true and petData.IsSuper ~= true then
 					local canUseDualEnchant = canPetUseDualEnchantMode(petData)
 					while Config.autoEnchant do
 						petData = getEnchantCurrency(equippedPetId)
