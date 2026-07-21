@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.21.19"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.21.20"
 local currentRunToken = {}
 activeStates._1rzHubLiteRunToken = currentRunToken
 local function isCurrentRun()
@@ -230,19 +230,21 @@ local function loadConfig()
 	end
 	return defaultConfig
 end
-local superLegendaryEnchantPriorityKeys = {
-	["hatch-blessing-plus"] = true,
-	["luck-boost-plus"] = true,
-	["hatch-blessing"] = true,
-	["luck-boost"] = true,
-}
-local function normalizeSuperLegendaryEnchantPriorities(priorities)
+activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities = function(priorities)
 	local normalizedPriorities = {}
 	local seenPriorities = {}
 	if type(priorities) == "table" then
 		for _, priorityKey in ipairs(priorities) do
 			priorityKey = tostring(priorityKey)
-			if superLegendaryEnchantPriorityKeys[priorityKey] and not seenPriorities[priorityKey] then
+			if
+				(
+					priorityKey == "hatch-blessing-plus"
+					or priorityKey == "luck-boost-plus"
+					or priorityKey == "hatch-blessing"
+					or priorityKey == "luck-boost"
+				)
+				and not seenPriorities[priorityKey]
+			then
 				seenPriorities[priorityKey] = true
 				table.insert(normalizedPriorities, priorityKey)
 			end
@@ -377,7 +379,7 @@ local function refreshChunkerAroundPlayer()
 end
 
 Config = loadConfig()
-Config.superLegendaryEnchantPriorities = normalizeSuperLegendaryEnchantPriorities(
+Config.superLegendaryEnchantPriorities = activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(
 	Config.superLegendaryEnchantPriorities
 )
 if Config.dashboardSyncAutoEnabled ~= true then
@@ -8173,7 +8175,7 @@ do
 														and type(configValue) == type(defaultConfig[configKey])
 													then
 												Config[configKey] = configKey == "superLegendaryEnchantPriorities"
-													and normalizeSuperLegendaryEnchantPriorities(configValue)
+													and activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(configValue)
 													or configValue
 														appliedConfigCount = appliedConfigCount + 1
 													end
@@ -9253,7 +9255,7 @@ local function prepareAutoEnchantTeam()
 	if type(playerData) ~= "table" or type(playerData.Pets) ~= "table" then
 		return false
 	end
-	local superEnchantPriorities = normalizeSuperLegendaryEnchantPriorities(
+	local superEnchantPriorities = activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(
 		Config.superLegendaryEnchantPriorities
 	)
 	local superEnchantPriorityIndexes = {}
