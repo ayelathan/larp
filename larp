@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.08"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.09"
 activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
 activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	activeStates.BGSI_Lite_DashboardLogSequence += 1
@@ -61,6 +61,17 @@ activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	}
 end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.23.09",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Relay connects without reloading",
+				description = "Opening connect.bat picks up accounts that are already running and shows the live connection count.",
+				icon = "radio-tower",
+			},
+		},
+	},
 	{
 		version = "2026.07.23.08",
 		releasedAt = "July 23, 2026",
@@ -9309,7 +9320,7 @@ do
 							end
 
 							local useDashboardRelay = activeStates.BGSI_Lite_DashboardRelayAvailable == true
-								or tick() - (tonumber(activeStates.BGSI_Lite_DashboardRelayProbeAt) or 0) >= 10
+								or tick() - (tonumber(activeStates.BGSI_Lite_DashboardRelayProbeAt) or 0) >= 3
 							if useDashboardRelay then
 								activeStates.BGSI_Lite_DashboardRelayProbeAt = tick()
 							end
