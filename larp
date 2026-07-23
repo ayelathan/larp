@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.11"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.12"
 activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
 activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	activeStates.BGSI_Lite_DashboardLogSequence += 1
@@ -61,6 +61,27 @@ activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	}
 end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.23.12",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Faster hatching",
+				description = "Hatch requests now follow confirmed game responses instead of flooding the same cooldown.",
+				icon = "gauge",
+			},
+			{
+				title = "Background box opening",
+				description = "Mystery boxes open in small batches without holding up the hatch loop.",
+				icon = "gift",
+			},
+			{
+				title = "Quicker live controls",
+				description = "Relay commands and potion use spend less time waiting between confirmed actions.",
+				icon = "radio-tower",
+			},
+		},
+	},
 	{
 		version = "2026.07.23.11",
 		releasedAt = "July 23, 2026",
@@ -315,6 +336,7 @@ local defaultConfig = {
 	adaptiveHatch = true,
 	healthRecoveryEnabled = true,
 	accountRole = "Balanced",
+	autoSkipIntro = true,
 	noHatchAnim = false,
 	autoSpamR = false,
 	autoBounty = false,
@@ -764,6 +786,61 @@ if Config.safeMode == true then
 else
 	activeStates.BGSI_Lite_ApplyPerformanceSettings()
 end
+activeStates.BGSI_Lite_SkipIntro = function()
+	if Config.autoSkipIntro ~= true or Config.safeMode == true then
+		return false
+	end
+	local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+	if not playerGui then
+		return false
+	end
+	for _, guiObject in ipairs(playerGui:GetDescendants()) do
+		if guiObject:IsA("GuiButton") and guiObject.Visible then
+			local buttonText = string.lower(tostring(guiObject.Name or ""))
+			if guiObject:IsA("TextButton") then
+				buttonText = buttonText .. " " .. string.lower(tostring(guiObject.Text or ""))
+			end
+			local containerText = " " .. buttonText
+			local container = guiObject.Parent
+			for _ = 1, 5 do
+				if not container or container == playerGui then
+					break
+				end
+				containerText = containerText .. " " .. string.lower(tostring(container.Name or ""))
+				container = container.Parent
+			end
+			if
+				(
+					string.find(containerText, "intro", 1, true)
+					or string.find(containerText, "cutscene", 1, true)
+					or string.find(containerText, "loading", 1, true)
+					or string.find(containerText, "welcome", 1, true)
+				)
+				and (
+					string.find(buttonText, "skip", 1, true)
+					or string.find(buttonText, "play", 1, true)
+					or string.find(buttonText, "continue", 1, true)
+					or string.find(buttonText, "start", 1, true)
+				)
+			then
+				pcall(function()
+					guiObject:Activate()
+				end)
+				return true
+			end
+		end
+	end
+	return false
+end
+task.spawn(function()
+	local introDeadline = tick() + 20
+	repeat
+		if activeStates.BGSI_Lite_SkipIntro() then
+			return
+		end
+		task.wait(0.2)
+	until tick() >= introDeadline or not isCurrentRun()
+end)
 
 -- Current clients do not expose Workspace.StreamingTargetRadius. The game
 -- controls rendered objects through each Chunker's RenderDistance instead.
@@ -1923,9 +2000,21 @@ local function fireHatchEgg(scriptStateQC)
 
 	local requestTime = tick()
 	local minimumHatchDelay = Config.adaptiveHatch == true
-			and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1, 0.06, 0.25)
-		or 0.1
+			and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.04, 0.03, 0.12)
+		or 0.06
 	if requestTime - (tonumber(activeStates.BGSI_Lite_LastHatchAttemptAt) or 0) < minimumHatchDelay then
+		return false
+	end
+	local lastRequestAt = tonumber(activeStates.BGSI_Lite_LastHatchRequestAt) or 0
+	local lastAcceptedAt = tonumber(activeStates.BGSI_Lite_LastHatchAcceptedAt) or 0
+	local acceptedInterval = tonumber(activeStates.BGSI_Lite_AcceptedHatchInterval) or 0.35
+	if requestTime < (tonumber(activeStates.BGSI_Lite_NextHatchRequestAt) or 0) then
+		return false
+	end
+	if
+		lastRequestAt > lastAcceptedAt
+		and requestTime - lastRequestAt < math.clamp(acceptedInterval * 0.12, 0.035, 0.06)
+	then
 		return false
 	end
 	activeStates.BGSI_Lite_LastHatchAttemptAt = requestTime
@@ -4319,6 +4408,18 @@ scriptStateDB:AddToggle("SafeMode", {
 		})
 	end,
 })
+scriptStateDB:AddToggle("AutoSkipIntro", {
+	Title = "Skip Intro",
+	Description = "Automatically press the game's intro or loading-screen continue button.",
+	Default = Config.autoSkipIntro,
+	Callback = function(enabled)
+		Config.autoSkipIntro = enabled
+		saveConfig()
+		if enabled then
+			task.spawn(activeStates.BGSI_Lite_SkipIntro)
+		end
+	end,
+})
 scriptStateDB:AddChangelog()
 scriptStateOG:SelectTab(1)
 Interface:Notify({
@@ -5199,9 +5300,9 @@ task.spawn(function()
 	local observedHatchCount
 	local lastSelectedEgg
 	activeStates.BGSI_Lite_AdaptiveHatchDelay = math.clamp(
-		tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1,
-		0.06,
-		0.25
+		tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.04,
+		0.03,
+		0.12
 	)
 	while isCurrentRun() do
 		local shouldMaintainHatching = activeStates.BGSI_Lite_ShouldMaintainHatching()
@@ -5209,8 +5310,8 @@ task.spawn(function()
 			shouldMaintainHatching
 					and (
 						Config.adaptiveHatch == true
-								and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1, 0.06, 0.25)
-							or 0.1
+								and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.04, 0.03, 0.12)
+							or 0.06
 					)
 				or 0.85
 		)
@@ -5263,13 +5364,6 @@ task.spawn(function()
 				or nil
 			if hatchCount and observedHatchCount and hatchCount ~= observedHatchCount then
 				lastHatchProgressAt = tick()
-				if Config.adaptiveHatch == true then
-					activeStates.BGSI_Lite_AdaptiveHatchDelay =
-						math.max(0.06, (tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1) - 0.005)
-				end
-			elseif Config.adaptiveHatch == true and tick() - lastHatchProgressAt >= 2 then
-				activeStates.BGSI_Lite_AdaptiveHatchDelay =
-					math.min(0.25, (tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1) + 0.01)
 			end
 			observedHatchCount = hatchCount or observedHatchCount
 		end
@@ -5309,7 +5403,13 @@ end)
 task.spawn(function()
 	while isCurrentRun() do
 		task.wait(Config.autoSpamR and 0.05 or 0.85)
-		if Config.autoSpamR ~= true then
+		if
+			Config.autoSpamR ~= true
+			or (
+				type(activeStates.BGSI_Lite_ShouldMaintainHatching) == "function"
+				and activeStates.BGSI_Lite_ShouldMaintainHatching()
+			)
+		then
 			continue
 		end
 		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
@@ -6804,9 +6904,75 @@ do
 		end
 		return math.max(0, remainingSeconds)
 	end
+	activeStates.BGSI_Lite_UsePotionAmount = function(potionType, potionLevel, requestedAmount)
+		local waitDeadline = tick() + 2
+		while activeStates.BGSI_Lite_PotionUseActive and tick() < waitDeadline do
+			task.wait(0.05)
+		end
+		if activeStates.BGSI_Lite_PotionUseActive then
+			return 0, "Another potion use is still running"
+		end
+		activeStates.BGSI_Lite_PotionUseActive = true
+		local useOk, usedAmount = pcall(function()
+			local playerData = profileStore:IsReady() and profileStore:Get() or nil
+			local potionItem = {
+				Type = "Potion",
+				Name = tostring(potionType or ""),
+				Level = tonumber(potionLevel) or 1,
+			}
+			local amountOk, amountBefore = pcall(itemUtil.GetOwnedAmount, itemUtil, playerData, potionItem)
+			amountBefore = amountOk and math.max(0, math.floor(tonumber(amountBefore) or 0)) or 0
+			local targetAmount = math.max(0, amountBefore - math.max(1, math.floor(tonumber(requestedAmount) or 1)))
+			local currentAmount = amountBefore
+			local stalledAttempts = 0
+			local useDeadline = tick() + math.clamp(6 + (amountBefore - targetAmount) * 0.25, 8, 90)
+			while
+				isCurrentRun()
+				and currentAmount > targetAmount
+				and tick() < useDeadline
+				and stalledAttempts < 4
+			do
+				local remainingAmount = currentAmount - targetAmount
+				local batchAmount = stalledAttempts > 0 and 1 or math.min(10, remainingAmount)
+				activeStates.BGSI_Lite_FireGameRemote(
+					"UsePotion",
+					potionItem.Name,
+					potionItem.Level,
+					batchAmount
+				)
+				local previousAmount = currentAmount
+				local replicationDeadline = tick() + 0.75
+				repeat
+					task.wait(0.05)
+					playerData = profileStore:IsReady() and profileStore:Get() or nil
+					local updatedOk, updatedAmount =
+						pcall(itemUtil.GetOwnedAmount, itemUtil, playerData, potionItem)
+					if updatedOk then
+						currentAmount = math.max(0, math.floor(tonumber(updatedAmount) or previousAmount))
+					end
+				until
+					not isCurrentRun()
+					or currentAmount < previousAmount
+					or tick() >= replicationDeadline
+				if currentAmount < previousAmount then
+					stalledAttempts = 0
+					task.wait(0.05)
+				else
+					stalledAttempts = stalledAttempts + 1
+					task.wait(0.12)
+				end
+			end
+			return amountBefore - currentAmount
+		end)
+		activeStates.BGSI_Lite_PotionUseActive = false
+		if not useOk then
+			return 0, tostring(usedAmount)
+		end
+		return math.max(0, tonumber(usedAmount) or 0)
+	end
 	task.spawn(function()
 		while isCurrentRun() do
-			task.wait(Config.potionAuto and 5 or 0.85)
+			task.wait(Config.potionAuto and 1 or 0.85)
 			if Config.potionAuto then
 				local playerData = profileStore:IsReady() and profileStore:Get() or nil
 				local remainingSeconds =
@@ -6817,23 +6983,25 @@ do
 						and type(sharedConstants.PotionDuration) == "table"
 						and tonumber(sharedConstants.PotionDuration[tonumber(Config.potionLevel) or 1])
 					or 120
-				local retryAfter = math.max(30, potionDuration * potionAmount - maintainSeconds)
 				if
 					remainingSeconds <= maintainSeconds
-					and tick() - (tonumber(activeStates.BGSI_Lite_LastAutoPotionUseAt) or 0) >= retryAfter
+					and tick() >= (tonumber(activeStates.BGSI_Lite_NextAutoPotionUseAt) or 0)
 				then
-					activeStates.BGSI_Lite_LastAutoPotionUseAt = tick()
-					local useSucceeded = pcall(
-						activeStates.BGSI_Lite_FireGameRemote,
-						"UsePotion",
+					local usedAmount = activeStates.BGSI_Lite_UsePotionAmount(
 						Config.potionType,
 						Config.potionLevel,
 						potionAmount
 					)
-					if useSucceeded and type(activeStates.BGSI_Lite_LogDashboardAction) == "function" then
+					activeStates.BGSI_Lite_NextAutoPotionUseAt = tick()
+						+ (
+							usedAmount > 0
+									and math.max(5, potionDuration * usedAmount - maintainSeconds)
+								or 5
+						)
+					if usedAmount > 0 and type(activeStates.BGSI_Lite_LogDashboardAction) == "function" then
 						activeStates.BGSI_Lite_LogDashboardAction(
 							"Using "
-								.. tostring(potionAmount)
+								.. tostring(usedAmount)
 								.. "x "
 								.. tostring(Config.potionType)
 								.. " "
@@ -6841,7 +7009,6 @@ do
 							"collect"
 						)
 					end
-					task.wait(2)
 				end
 			end
 		end
@@ -9542,7 +9709,7 @@ do
 							if syncSucceeded then
 								if responsePayload.relay == true then
 									dashboardSyncDelay =
-										math.max(0.35, tonumber(responsePayload.heartbeatSeconds) or 0.5)
+										math.max(0.2, tonumber(responsePayload.heartbeatSeconds) or 0.25)
 								else
 									dashboardSyncDelay = math.max(3, tonumber(responsePayload.heartbeatSeconds) or 5)
 										+ ((LocalPlayer.UserId % 100) / 100)
@@ -9754,34 +9921,35 @@ do
 												end
 												quantity = math.min(quantity, amountBefore)
 												local targetAmount = amountBefore - quantity
+												if itemType == "Potion" then
+													local usedAmount, potionError =
+														activeStates.BGSI_Lite_UsePotionAmount(
+															itemName,
+															itemLevel,
+															quantity
+														)
+													if usedAmount < quantity then
+														error(
+															potionError
+																or (
+																	"The game only used "
+																	.. tostring(usedAmount)
+																	.. " of "
+																	.. tostring(quantity)
+																	.. " "
+																	.. itemName
+																)
+														)
+													end
+													return
+												end
 												local updatedAmount = amountBefore
 												local failedAttempts = 0
-												local usePotionsIndividually = false
 												local commandDeadline = tick() + math.clamp(20 + quantity * 0.55, 20, 180)
 												local powerup = type(giftData) == "table" and giftData[itemName] or nil
 												while updatedAmount > targetAmount and tick() < commandDeadline and failedAttempts < 5 do
 													local remaining = updatedAmount - targetAmount
-													if itemType == "Potion" then
-														local useAmount = math.min(remaining, 25)
-														if usePotionsIndividually then
-															for _ = 1, useAmount do
-																activeStates.BGSI_Lite_FireGameRemote(
-																	"UsePotion",
-																	itemName,
-																	itemLevel,
-																	1
-																)
-																task.wait(0.45)
-															end
-														else
-															activeStates.BGSI_Lite_FireGameRemote(
-																"UsePotion",
-																itemName,
-																itemLevel,
-																useAmount
-															)
-														end
-													elseif itemType == "Rune" then
+													if itemType == "Rune" then
 														remoteEvent:FireServer("UseRune", itemName, itemTier, remaining)
 													elseif itemType == "Powerup" and itemName == "Golden Orb" then
 														for _ = 1, math.min(remaining, 25) do
@@ -9812,10 +9980,6 @@ do
 													until updatedAmount < previousAmount or tick() >= replicationDeadline
 													if updatedAmount < previousAmount then
 														failedAttempts = 0
-													elseif itemType == "Potion" and not usePotionsIndividually then
-														usePotionsIndividually = true
-														failedAttempts = 0
-														task.wait(0.5)
 													else
 														failedAttempts = failedAttempts + 1
 													end
@@ -10254,17 +10418,30 @@ do
 	end)
 	task.spawn(function()
 		while isCurrentRun() do
-			local scriptStateIP = math.clamp(tonumber(Config.autoOpenMysteryDelay) or 0.2, 0.1, 60)
+			local scriptStateIP = math.clamp(tonumber(Config.autoOpenMysteryDelay) or 0.2, 0.2, 60)
 			task.wait(Config.autoOpenMystery and scriptStateIP or 0.85)
 			if
 				Config.autoOpenMystery
 				and type(Config.selectedMysteryBox) == "string"
 				and Config.selectedMysteryBox ~= ""
 			then
+				local boxAmount = 10
 				pcall(function()
-					remoteEvent:FireServer("UseGift", Config.selectedMysteryBox, 50)
+					local playerData = profileStore:IsReady() and profileStore:Get() or nil
+					local amount = itemUtil:GetOwnedAmount(
+						playerData,
+						{ Type = "Powerup", Name = Config.selectedMysteryBox }
+					)
+					boxAmount = math.min(10, math.max(0, math.floor(tonumber(amount) or 0)))
 				end)
-				claimRenderedGiftsForDuration(math.max(1.25, math.min(2.5, scriptStateIP)))
+				if boxAmount > 0 then
+					pcall(
+						activeStates.BGSI_Lite_FireGameRemote,
+						"UseGift",
+						Config.selectedMysteryBox,
+						boxAmount
+					)
+				end
 			end
 		end
 	end)
@@ -13500,7 +13677,32 @@ activeStates.BGSI_Lite_InstallPetWebhookListener = function()
 				or scriptStateKW == "HatchPowerupEgg"
 				or scriptStateKW == "ExclusiveHatch"
 			then
-				activeStates.BGSI_Lite_LastHatchEventAt = tick()
+				local hatchAcceptedAt = tick()
+				if scriptStateKW == "HatchEgg" then
+					local previousHatchAcceptedAt = tonumber(activeStates.BGSI_Lite_LastHatchAcceptedAt)
+					if previousHatchAcceptedAt and previousHatchAcceptedAt > 0 then
+						local hatchInterval = hatchAcceptedAt - previousHatchAcceptedAt
+						if hatchInterval >= 0.05 and hatchInterval <= 3 then
+							local previousInterval =
+								tonumber(activeStates.BGSI_Lite_AcceptedHatchInterval) or hatchInterval
+							activeStates.BGSI_Lite_AcceptedHatchInterval =
+								previousInterval * 0.7 + hatchInterval * 0.3
+							activeStates.BGSI_Lite_AdaptiveHatchDelay = math.clamp(
+								activeStates.BGSI_Lite_AcceptedHatchInterval * 0.12,
+								0.03,
+								0.06
+							)
+						end
+					end
+					activeStates.BGSI_Lite_LastHatchAcceptedAt = hatchAcceptedAt
+					activeStates.BGSI_Lite_NextHatchRequestAt = hatchAcceptedAt
+						+ math.clamp(
+							(tonumber(activeStates.BGSI_Lite_AcceptedHatchInterval) or 0.35) * 0.78,
+							0.08,
+							0.3
+						)
+				end
+				activeStates.BGSI_Lite_LastHatchEventAt = hatchAcceptedAt
 				for _, dashboardHatchPet in ipairs(scriptStatePO) do
 					local dashboardPetName = dashboardHatchPet.Name
 						or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Name)
