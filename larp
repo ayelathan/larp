@@ -50,8 +50,51 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.22.10"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.22.13"
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.22.13",
+		releasedAt = "July 22, 2026",
+		notes = {
+			{
+				title = "Enchant team rebuilt",
+				description = "Super Legendary priorities now use the game's exact enchant IDs and equip in the saved order without repeatedly rebuilding a matching team.",
+				icon = "sparkles",
+			},
+			{
+				title = "Lower enchant overhead",
+				description = "Pet lookup, equip synchronization, and reroll pacing now follow replicated state and the game's cooldown instead of repeatedly scanning and resending requests.",
+				icon = "activity",
+			},
+		},
+	},
+	{
+		version = "2026.07.22.12",
+		releasedAt = "July 22, 2026",
+		notes = {
+			{
+				title = "Safer full-inventory cleanup",
+				description = "Full pet storage now clears eligible duplicate low-rarity pets while protecting locked, equipped, Super Legendary, Secret, Infinity, Void, and Celestial pets.",
+				icon = "shield-check",
+			},
+			{
+				title = "More accurate activity",
+				description = "Dashboard activity now prioritizes active hatching and reports cleanup and automation states more accurately.",
+				icon = "activity",
+			},
+		},
+	},
+	{
+		version = "2026.07.22.11",
+		releasedAt = "July 22, 2026 at 8:42 PM CT",
+		notes = {
+			{
+				title = "Rare pet detection fixed",
+				description = "Dashboard inventory totals now detect Secret, Infinity, Void, and Celestial pets from both rarity values and pet flags.",
+				icon = "sparkles",
+			},
+		},
+	},
 	{
 		version = "2026.07.22.10",
 		releasedAt = "July 22, 2026 at 3:03 PM CT",
@@ -820,6 +863,41 @@ end)
 pcall(function()
 	petRarityData = require(ReplicatedStorage.Shared.Data.Pets)
 end)
+activeStates.BGSI_Lite_ResolvePetRarity = function(pet, petInfo)
+	local nestedPet = type(pet) == "table" and type(pet.Pet) == "table" and pet.Pet or nil
+	local nestedData = type(pet) == "table" and type(pet.Data) == "table" and pet.Data or nil
+	local raritySources = {
+		type(pet) == "table" and pet.Rarity or nil,
+		type(petInfo) == "table" and petInfo.Rarity or nil,
+		nestedPet and nestedPet.Rarity or nil,
+		nestedData and nestedData.Rarity or nil,
+	}
+	local rarityFlags = {
+		Celestial = (type(pet) == "table" and pet.Celestial == true)
+			or (type(petInfo) == "table" and petInfo.Celestial == true)
+			or (nestedPet and nestedPet.Celestial == true)
+			or (nestedData and nestedData.Celestial == true),
+		Infinity = (type(pet) == "table" and pet.Infinity == true)
+			or (type(petInfo) == "table" and petInfo.Infinity == true)
+			or (nestedPet and nestedPet.Infinity == true)
+			or (nestedData and nestedData.Infinity == true),
+		Void = (type(pet) == "table" and pet.Void == true)
+			or (type(petInfo) == "table" and petInfo.Void == true)
+			or (nestedPet and nestedPet.Void == true)
+			or (nestedData and nestedData.Void == true),
+	}
+	for _, rarityName in ipairs({ "Celestial", "Infinity", "Void" }) do
+		if rarityFlags[rarityName] then
+			return rarityName
+		end
+		for _, raritySource in ipairs(raritySources) do
+			if string.find(string.lower(tostring(raritySource or "")), string.lower(rarityName), 1, true) then
+				return rarityName
+			end
+		end
+	end
+	return tostring(raritySources[1] or raritySources[2] or raritySources[3] or raritySources[4] or "Unknown")
+end
 pcall(function()
 	eggDataModule = require(ReplicatedStorage.Shared.Data.Eggs)
 end)
@@ -865,6 +943,167 @@ local networkRemote =
 	ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Framework"):WaitForChild("Network"):WaitForChild("Remote")
 local remoteEvent = networkRemote:WaitForChild("RemoteEvent")
 local remoteFunction = networkRemote:WaitForChild("RemoteFunction")
+activeStates.BGSI_Lite_GetPetInventoryUsage = function(playerData)
+	if type(activeStates.BGSI_Lite_PetStorageStatsUtil) ~= "table" then
+		pcall(function()
+			activeStates.BGSI_Lite_PetStorageStatsUtil = require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+		end)
+	end
+	local usageOk, petUsage = pcall(function()
+		return activeStates.BGSI_Lite_PetStorageStatsUtil:GetUsedPetStorage(playerData)
+	end)
+	if usageOk and type(petUsage) == "number" then
+		return math.max(0, math.floor(petUsage))
+	end
+	local petAmount = 0
+	for _, pet in ipairs(type(playerData) == "table" and type(playerData.Pets) == "table" and playerData.Pets or {}) do
+		if type(pet) == "table" then
+			petAmount += math.max(1, math.floor(tonumber(pet.Amount or pet.Count) or 1))
+		end
+	end
+	return petAmount
+end
+activeStates.BGSI_Lite_GetPetInventoryCapacity = function(playerData)
+	if type(activeStates.BGSI_Lite_PetStorageStatsUtil) ~= "table" then
+		pcall(function()
+			activeStates.BGSI_Lite_PetStorageStatsUtil = require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+		end)
+	end
+	local capacityOk, petCapacity = pcall(function()
+		return activeStates.BGSI_Lite_PetStorageStatsUtil:GetMaxPetStorage(playerData)
+	end)
+	return capacityOk and type(petCapacity) == "number" and math.max(0, math.floor(petCapacity)) or nil
+end
+activeStates.BGSI_Lite_IsPetEquipped = function(playerData, petId)
+	local equippedTeam = type(playerData) == "table"
+		and type(playerData.Teams) == "table"
+		and playerData.Teams[playerData.TeamEquipped]
+	for _, equippedPetId in ipairs(equippedTeam and equippedTeam.Pets or {}) do
+		if tostring(equippedPetId) == tostring(petId) then
+			return true
+		end
+	end
+	return false
+end
+activeStates.BGSI_Lite_GetDisposablePetRank = function(pet)
+	if type(pet) ~= "table" or pet.Super == true or pet.IsSuper == true or pet.SuperLegendary == true then
+		return nil
+	end
+	if pet.Locked == true or pet.IsLocked == true then
+		return nil
+	end
+	if
+		pet.Shiny == true
+		or pet.IsShiny == true
+		or pet.Mythic == true
+		or pet.IsMythic == true
+		or pet.XL == true
+		or pet.IsXL == true
+		or (tonumber(pet.XP) or 0) > 0
+		or pet.Enchants ~= nil
+	then
+		return nil
+	end
+	local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
+	local rarity = activeStates.BGSI_Lite_ResolvePetRarity(pet, petInfo)
+	return ({ Common = 1, Unique = 2, Rare = 3, Epic = 4, Legendary = 5 })[rarity]
+end
+activeStates.BGSI_Lite_FindPetById = function(playerData, petId)
+	for _, pet in ipairs(type(playerData) == "table" and type(playerData.Pets) == "table" and playerData.Pets or {}) do
+		if type(pet) == "table" and tostring(pet.Id or "") == tostring(petId) then
+			return pet
+		end
+	end
+	return nil
+end
+activeStates.BGSI_Lite_CleanupFullPetInventory = function()
+	if activeStates.BGSI_Lite_PetInventoryCleanupActive then
+		return false
+	end
+	local playerData = profileStore:IsReady() and profileStore:Get() or nil
+	local inventoryFullOk, inventoryFull = pcall(function()
+		return activeStates.BGSI_Lite_PetStorageStatsUtil:IsInventoryFull(playerData)
+	end)
+	if not inventoryFullOk or inventoryFull ~= true then
+		return false
+	end
+	local candidateGroups = {}
+	for _, pet in ipairs(type(playerData) == "table" and type(playerData.Pets) == "table" and playerData.Pets or {}) do
+		local petRank = activeStates.BGSI_Lite_GetDisposablePetRank(pet)
+		local petId = type(pet) == "table" and tostring(pet.Id or "") or ""
+		if petRank and petId ~= "" and not activeStates.BGSI_Lite_IsPetEquipped(playerData, petId) then
+			local petName = tostring(pet.Name or "")
+			local candidateKey = petName .. "|" .. tostring(petRank)
+			local candidateGroup = candidateGroups[candidateKey]
+			if not candidateGroup then
+				candidateGroup = { name = petName, rank = petRank, amount = 0, ids = {} }
+				candidateGroups[candidateKey] = candidateGroup
+			end
+			candidateGroup.amount += math.max(1, math.floor(tonumber(pet.Amount or pet.Count) or 1))
+			table.insert(candidateGroup.ids, petId)
+		end
+	end
+	local candidates = {}
+	for _, candidateGroup in pairs(candidateGroups) do
+		if candidateGroup.amount >= 10 then
+			table.insert(candidates, candidateGroup)
+		end
+	end
+	table.sort(candidates, function(leftCandidate, rightCandidate)
+		if leftCandidate.rank ~= rightCandidate.rank then
+			return leftCandidate.rank < rightCandidate.rank
+		end
+		if leftCandidate.amount ~= rightCandidate.amount then
+			return leftCandidate.amount > rightCandidate.amount
+		end
+		return leftCandidate.name < rightCandidate.name
+	end)
+	local selectedCandidate = candidates[1]
+	if not selectedCandidate then
+		return false
+	end
+	activeStates.BGSI_Lite_PetInventoryCleanupActive = true
+	for _, petId in ipairs(selectedCandidate.ids) do
+		while isCurrentRun() do
+			playerData = profileStore:IsReady() and profileStore:Get() or nil
+			local livePet = activeStates.BGSI_Lite_FindPetById(playerData, petId)
+			if
+				not livePet
+				or livePet.Name ~= selectedCandidate.name
+				or not activeStates.BGSI_Lite_GetDisposablePetRank(livePet)
+				or activeStates.BGSI_Lite_IsPetEquipped(playerData, petId)
+			then
+				break
+			end
+			local amountBeforeDelete = math.max(1, math.floor(tonumber(livePet.Amount or livePet.Count) or 1))
+			remoteEvent:FireServer("DeletePet", petId, amountBeforeDelete, false)
+			local deleteDeadline = tick() + 3
+			local amountAfterDelete = amountBeforeDelete
+			repeat
+				task.wait(0.1)
+				playerData = profileStore:IsReady() and profileStore:Get() or nil
+				livePet = activeStates.BGSI_Lite_FindPetById(playerData, petId)
+				amountAfterDelete = livePet
+					and math.max(1, math.floor(tonumber(livePet.Amount or livePet.Count) or 1))
+					or 0
+			until amountAfterDelete < amountBeforeDelete or tick() >= deleteDeadline
+			if amountAfterDelete >= amountBeforeDelete then
+				break
+			end
+		end
+	end
+	activeStates.BGSI_Lite_PetInventoryCleanupActive = false
+	activeStates.BGSI_Lite_LastPetInventoryCleanup = tick()
+	return true
+end
+task.spawn(function()
+	while isCurrentRun() do
+		task.wait(5)
+		if tick() - (tonumber(activeStates.BGSI_Lite_LastPetInventoryCleanup) or 0) >= 20 then
+			pcall(activeStates.BGSI_Lite_CleanupFullPetInventory)
+		end
+	end
+end)
 local hatchEffectModule, scriptStateID
 pcall(function()
 	hatchEffectModule = require(ReplicatedStorage.Client.Effects.HatchEgg)
@@ -7697,7 +7936,7 @@ do
 							local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
 							local petId = tostring(pet.Id or "")
 							local petName = tostring(pet.Name or "Unknown Pet")
-							local petRarity = tostring(petInfo and petInfo.Rarity or "")
+							local petRarity = activeStates.BGSI_Lite_ResolvePetRarity(pet, petInfo)
 							local imageAssetId = activeStates.BGSI_Lite_GetDashboardPetAssetId(pet, petInfo)
 							local stackKey = table.concat(
 								{
@@ -8229,6 +8468,15 @@ do
 								dashboardConfig[configKey] = Config[configKey]
 							end
 						end
+						local playerData = profileStore:IsReady() and profileStore:Get() or nil
+						dashboardConfig.dashboardPetStorageUsed = activeStates.BGSI_Lite_GetPetInventoryUsage(playerData)
+						dashboardConfig.dashboardPetStorageCapacity =
+							activeStates.BGSI_Lite_GetPetInventoryCapacity(playerData) or 0
+						pcall(function()
+							dashboardConfig.dashboardEggsPerHatch = dashboardStatsUtil:GetMaxEggHatches(playerData)
+							dashboardConfig.dashboardHatchSpeedMultiplier =
+								dashboardStatsUtil:GetHatchSpeed(LocalPlayer, playerData)
+						end)
 						return dashboardConfig
 					end
 
@@ -8254,6 +8502,9 @@ do
 						if activeStates.BGSI_Lite_GemGenieActive then
 							return "Running Gem Genie", "collect"
 						end
+						if activeStates.BGSI_Lite_PetInventoryCleanupActive then
+							return "Clearing duplicate pets from full storage", "collect"
+						end
 						if activeStates.BGSI_Lite_TicketPickupActive then
 							return "Collecting Tickets", "collect"
 						end
@@ -8263,14 +8514,20 @@ do
 						if activeStates.BGSI_Lite_RiftEggActive then
 							return "Working on a rift egg", "quest"
 						end
-						if Config.autoEnchant then
-							return "Maintaining the enchant team", "enchant"
-						end
 						if Config.autoHopLuckEgg and activeStates.BGSI_Lite_LuckEggActive ~= true then
 							return "Searching for a 4x Luck egg", "search"
 						end
 						if isHatching then
 							return "Hatching " .. tostring(currentEggName), "hatch"
+						end
+						if Config.autoEnchant then
+							return "Monitoring the enchant team", "enchant"
+						end
+						if Config.autoBuyShops then
+							return "Checking selected shops", "collect"
+						end
+						if Config.autoUseFragments then
+							return "Using available fragments", "collect"
 						end
 						if Config.autoClaimPrizes then
 							return "Checking prize milestones", "collect"
@@ -8759,15 +9016,16 @@ do
 														dashboardConfigKeySet[configKey]
 														and type(configValue) == type(defaultConfig[configKey])
 													then
-												Config[configKey] = configKey == "superLegendaryEnchantPriorities"
-													and activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(configValue)
-													or configValue
+														Config[configKey] = configKey == "superLegendaryEnchantPriorities"
+																and activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(configValue)
+															or configValue
 														appliedConfigCount = appliedConfigCount + 1
 													end
-											end
+												end
 											saveConfig()
 											activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 											activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = 0
+											activeStates.BGSI_Lite_AutoEnchantBlockedUntil = 0
 											clearDisabledPriorityStates()
 											_G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
 											pcall(function()
@@ -9197,6 +9455,8 @@ do
 		Default = Config.autoEnchant,
 		Callback = function(scriptStateADD)
 			Config.autoEnchant = scriptStateADD
+			activeStates.BGSI_Lite_AutoEnchantBlockedUntil = 0
+			activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = 0
 			saveConfig()
 		end,
 	})
@@ -9301,6 +9561,16 @@ local function findPetEnchantSlot(scriptStateKS, scriptStateAY)
 		return nil
 	end
 	local scriptStateRS = normalizeEnchantName(scriptStateAY)
+	local scriptStateBH = scriptStateKS and (scriptStateKS.Enchants or scriptStateKS.Enchantments) or {}
+	for loopSlotW = 1, 2 do
+		local enchantEntry = scriptStateBH[loopSlotW] or scriptStateBH[tostring(loopSlotW)]
+		local enchantId = type(enchantEntry) == "table"
+			and (enchantEntry.Id or enchantEntry.id or enchantEntry.ID or enchantEntry.Name)
+			or enchantEntry
+		if normalizeEnchantName(enchantId) == scriptStateRS then
+			return loopSlotW
+		end
+	end
 	local scriptStateIU = getPetEnchantList(scriptStateKS)
 	for loopSlotW = 1, 2 do
 		if scriptStateIU[loopSlotW] and normalizeEnchantName(scriptStateIU[loopSlotW]) == scriptStateRS then
@@ -9810,6 +10080,12 @@ local function getEnchantablePets()
 	return (scriptStateTI and type(scriptStateTI.Pets) == "table") and scriptStateTI.Pets or {}
 end
 local function getEnchantCurrency(scriptStateVC)
+	if type(profileStore.GetPetById) == "function" then
+		local petLookupOk, indexedPet = pcall(profileStore.GetPetById, profileStore, scriptStateVC)
+		if petLookupOk and type(indexedPet) == "table" then
+			return indexedPet
+		end
+	end
 	local scriptStateQQ, scriptStateACB = pcall(function()
 		return profileStore:Get()
 	end)
@@ -9823,17 +10099,15 @@ local function getEnchantCurrency(scriptStateVC)
 	end
 	return nil
 end
+activeStates.BGSI_Lite_SuperEnchantPriorityKeyById = {
+	["super-speed-plus"] = "hatch-blessing-plus",
+	["super-luck-plus"] = "luck-boost-plus",
+	["super-speed"] = "hatch-blessing",
+	["super-luck"] = "luck-boost",
+}
 local function getSuperLegendaryEnchantPriorityKey(enchantEntry)
-	local enchantDisplayName = getWebhookEnchantDisplayName(enchantEntry)
-	local normalizedEnchantName = normalizeEnchantName(enchantDisplayName or enchantEntry.Id):gsub("%+", "plus")
-	local isPlus = normalizedEnchantName:find("plus", 1, true) ~= nil or (tonumber(enchantEntry.Level) or 1) > 1
-	if normalizedEnchantName:find("hatchblessing", 1, true) == 1 then
-		return isPlus and "hatch-blessing-plus" or "hatch-blessing"
-	end
-	if normalizedEnchantName:find("luckboost", 1, true) == 1 then
-		return isPlus and "luck-boost-plus" or "luck-boost"
-	end
-	return nil
+	local enchantId = type(enchantEntry) == "table" and (enchantEntry.Id or enchantEntry.id) or enchantEntry
+	return activeStates.BGSI_Lite_SuperEnchantPriorityKeyById[tostring(enchantId or "")]
 end
 local function prepareAutoEnchantTeam()
 	local playerData = profileStore:IsReady() and profileStore:Get() or nil
@@ -9851,19 +10125,23 @@ local function prepareAutoEnchantTeam()
 	for _, pet in ipairs(playerData.Pets) do
 		local petInfo = type(petRarityData) == "table" and petRarityData[pet.Name] or nil
 		local rarity = petInfo and petInfo.Rarity
-		local superEnchantScore = 0
+		local superEnchantPriorityIndex
+		local superEnchantMatchCount = 0
 		local isSuperLegendary = pet.Super == true or pet.IsSuper == true
 		if isSuperLegendary then
-			for _, enchantEntry in ipairs(getSuperLegendaryWebhookEnchantList(pet)) do
+			for _, enchantEntry in ipairs(type(pet.Enchants) == "table" and pet.Enchants or {}) do
 				local enchantKey = getSuperLegendaryEnchantPriorityKey(enchantEntry)
 				local priorityIndex = enchantKey and superEnchantPriorityIndexes[enchantKey]
+				if priorityIndex and (not superEnchantPriorityIndex or priorityIndex < superEnchantPriorityIndex) then
+					superEnchantPriorityIndex = priorityIndex
+				end
 				if priorityIndex then
-					superEnchantScore = math.max(superEnchantScore, #superEnchantPriorities - priorityIndex + 1)
+					superEnchantMatchCount += 1
 				end
 			end
 		end
 		if
-			superEnchantScore > 0
+			superEnchantPriorityIndex ~= nil
 			or (
 				not isSuperLegendary
 				and (pet.Shiny == true or pet.IsShiny == true)
@@ -9872,9 +10150,10 @@ local function prepareAutoEnchantTeam()
 		then
 			table.insert(candidates, {
 				pet = pet,
-				priority = superEnchantScore > 0 and 3 or (rarity == "Celestial" and 2 or 1),
-				enchantScore = superEnchantScore > 0
-					and superEnchantScore
+				priority = superEnchantPriorityIndex and 1 or (rarity == "Celestial" and 2 or 3),
+				enchantPriority = superEnchantPriorityIndex or math.huge,
+				enchantScore = superEnchantPriorityIndex
+					and superEnchantMatchCount
 					or ((findPetEnchantSlot(pet, "secret-hunter") and 1 or 0)
 						+ (findPetEnchantSlot(pet, "ultra-roller") and 1 or 0)),
 			})
@@ -9885,7 +10164,10 @@ local function prepareAutoEnchantTeam()
 	end
 	table.sort(candidates, function(leftCandidate, rightCandidate)
 		if leftCandidate.priority ~= rightCandidate.priority then
-			return leftCandidate.priority > rightCandidate.priority
+			return leftCandidate.priority < rightCandidate.priority
+		end
+		if leftCandidate.enchantPriority ~= rightCandidate.enchantPriority then
+			return leftCandidate.enchantPriority < rightCandidate.enchantPriority
 		end
 		if leftCandidate.enchantScore ~= rightCandidate.enchantScore then
 			return leftCandidate.enchantScore > rightCandidate.enchantScore
@@ -9928,7 +10210,7 @@ local function prepareAutoEnchantTeam()
 	if teamMatches then
 		return true
 	end
-	if tick() - (tonumber(activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt) or 0) < 4 then
+	if tick() - (tonumber(activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt) or 0) < 6 then
 		return false
 	end
 	activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = tick()
@@ -9938,141 +10220,194 @@ local function prepareAutoEnchantTeam()
 		equippedPetIdSet[normalizedPetId] = true
 		if not selectedPetIdSet[normalizedPetId] then
 			remoteEvent:FireServer("UnequipPet", petId)
+			task.wait(0.06)
 		end
 	end
+	task.wait(0.15)
 	for _, petId in ipairs(selectedPetIds) do
 		if not equippedPetIdSet[petId] then
 			remoteEvent:FireServer("EquipPet", petId)
+			task.wait(0.06)
 		end
 	end
-	local equipDeadline = tick() + 4
+	local equipDeadline = tick() + 3
+	local equipRetryCount = 0
+	local nextEquipRetry = tick() + 0.75
 	repeat
-		task.wait(0.2)
+		task.wait(0.15)
 		equippedPetIds = getEnchantablePets()
 		equippedPetIdSet = {}
 		for _, petId in ipairs(equippedPetIds) do
 			equippedPetIdSet[tostring(petId)] = true
 		end
 		teamMatches = #equippedPetIds == #selectedPetIds
+		local missingPetIds = {}
 		for _, petId in ipairs(selectedPetIds) do
 			if not equippedPetIdSet[petId] then
 				teamMatches = false
+				table.insert(missingPetIds, petId)
+			end
+		end
+		if not teamMatches and tick() >= nextEquipRetry and equipRetryCount < 2 then
+			equipRetryCount += 1
+			nextEquipRetry = tick() + 0.75
+			for _, petId in ipairs(missingPetIds) do
 				remoteEvent:FireServer("EquipPet", petId)
+				task.wait(0.06)
 			end
 		end
 	until teamMatches or tick() >= equipDeadline
 	return teamMatches
 end
 local autoEnchantThreadRunning = false
--- Auto enchant loop: rerolls equipped pets until the target enchant setup is found.
+activeStates.BGSI_Lite_GetPetEnchantSignature = function(petData)
+	local signatureParts = {}
+	for enchantSlot, enchantEntry in ipairs(type(petData) == "table" and type(petData.Enchants) == "table" and petData.Enchants or {}) do
+		table.insert(signatureParts, table.concat({
+			tostring(enchantSlot),
+			tostring(enchantEntry.Id or enchantEntry.id or ""),
+			tostring(enchantEntry.Level or enchantEntry.level or ""),
+			tostring(enchantEntry.Extra or enchantEntry.extra or ""),
+		}, ":"))
+	end
+	return table.concat(signatureParts, "|")
+end
+activeStates.BGSI_Lite_IsPetEnchantTargetSatisfied = function(
+	petData,
+	targetEnchantOne,
+	targetEnchantTwo,
+	targetEnchantLevel
+)
+	local hasTargetEnchantOne = getPetEnchantInfo(petData, targetEnchantOne, targetEnchantLevel)
+	local hasSecondEnchantTarget = targetEnchantTwo ~= "" and targetEnchantTwo ~= "(None - single target)"
+	if not hasSecondEnchantTarget then
+		return hasTargetEnchantOne ~= nil
+	end
+	local hasTargetEnchantTwo = getPetEnchantInfo(petData, targetEnchantTwo, targetEnchantLevel)
+	if canPetUseDualEnchantMode(petData) then
+		return hasTargetEnchantOne ~= nil and hasTargetEnchantTwo ~= nil
+	end
+	return hasTargetEnchantOne ~= nil or hasTargetEnchantTwo ~= nil
+end
+activeStates.BGSI_Lite_RerollEnchantPet = function(
+	petId,
+	targetEnchantOne,
+	targetEnchantTwo,
+	targetEnchantLevel,
+	selectedEnchantCurrencyMode
+)
+	local rerollCooldown = math.max(0.1, tonumber(sharedConstants and sharedConstants.EnchantRerollCooldown) or 0.25)
+	while Config.autoEnchant and isCurrentRun() do
+		local petData = getEnchantCurrency(petId)
+		if not petData or petData.Super == true or petData.IsSuper == true then
+			return
+		end
+		if activeStates.BGSI_Lite_IsPetEnchantTargetSatisfied(
+			petData,
+			targetEnchantOne,
+			targetEnchantTwo,
+			targetEnchantLevel
+		) then
+			return
+		end
+		local hasSecondEnchantTarget = targetEnchantTwo ~= "" and targetEnchantTwo ~= "(None - single target)"
+		local currentSlotForTargetOne = findPetEnchantSlot(petData, targetEnchantOne)
+		local currentSlotForTargetTwo = hasSecondEnchantTarget and findPetEnchantSlot(petData, targetEnchantTwo) or nil
+		local rerollSlot
+		local targetEnchantForCurrency = targetEnchantOne
+		if hasSecondEnchantTarget and canPetUseDualEnchantMode(petData) then
+			if currentSlotForTargetOne and not currentSlotForTargetTwo then
+				rerollSlot = currentSlotForTargetOne
+				targetEnchantForCurrency = targetEnchantTwo
+			elseif currentSlotForTargetTwo and not currentSlotForTargetOne then
+				rerollSlot = currentSlotForTargetTwo
+				targetEnchantForCurrency = targetEnchantOne
+			end
+		end
+		local resolvedEnchantCurrency = resolveEnchantCurrency(selectedEnchantCurrencyMode, targetEnchantForCurrency)
+		local previousSignature = activeStates.BGSI_Lite_GetPetEnchantSignature(petData)
+		local requestAccepted = false
+		if resolvedEnchantCurrency == "Shadow Crystals" then
+			if not hasShadowCrystalCurrency() then
+				activeStates.BGSI_Lite_AutoEnchantBlockedUntil = tick() + 10
+				return
+			end
+			requestAccepted = pcall(remoteEvent.FireServer, remoteEvent, "UseShadowCrystal", petId, rerollSlot)
+		else
+			local currencyType = resolvedEnchantCurrency == "Reroll Orbs" and "Powerup" or "Gems"
+			local requestOk, updatedPetId = pcall(
+				remoteFunction.InvokeServer,
+				remoteFunction,
+				"RerollEnchants",
+				petId,
+				currencyType,
+				rerollSlot
+			)
+			if updatedPetId == "toofast" then
+				task.wait(0.1)
+				continue
+			end
+			requestAccepted = requestOk and updatedPetId ~= nil and updatedPetId ~= false
+			if requestAccepted and type(updatedPetId) == "string" and updatedPetId ~= "" then
+				petId = updatedPetId
+			end
+		end
+		if not requestAccepted then
+			activeStates.BGSI_Lite_AutoEnchantBlockedUntil = tick() + 5
+			return
+		end
+		task.wait(rerollCooldown + 0.05)
+		local replicationDeadline = tick() + 1.5
+		local enchantUpdated = false
+		repeat
+			petData = getEnchantCurrency(petId)
+			enchantUpdated = petData ~= nil
+				and activeStates.BGSI_Lite_GetPetEnchantSignature(petData) ~= previousSignature
+			if not enchantUpdated then
+				task.wait(0.05)
+			end
+		until enchantUpdated or not Config.autoEnchant or not isCurrentRun() or tick() >= replicationDeadline
+		if not enchantUpdated then
+			activeStates.BGSI_Lite_AutoEnchantBlockedUntil = tick() + 3
+			return
+		end
+	end
+end
 local function getEnchantTargetList()
 	if autoEnchantThreadRunning then
 		return
 	end
-	Config.equippedTargetEnchant = "secret-hunter"
-	Config.equippedTargetEnchant2 = "ultra-roller"
 	autoEnchantThreadRunning = true
 	task.spawn(function()
-		while Config.autoEnchant do
-			if not prepareAutoEnchantTeam() then
-				task.wait(0.5)
+		while Config.autoEnchant and isCurrentRun() do
+			if tick() < (tonumber(activeStates.BGSI_Lite_AutoEnchantBlockedUntil) or 0) then
+				task.wait(1)
 				continue
 			end
-			local targetEnchantOne = "secret-hunter"
-			local targetEnchantTwo = "ultra-roller"
+			if not prepareAutoEnchantTeam() then
+				task.wait(2)
+				continue
+			end
+			local targetEnchantOne = tostring(Config.equippedTargetEnchant or "secret-hunter")
+			local targetEnchantTwo = tostring(Config.equippedTargetEnchant2 or "ultra-roller")
 			local targetEnchantLevel = tonumber(Config.equippedTargetEnchantLevel) or 0
 			local selectedEnchantCurrencyMode = Config.equippedEnchantCurrency
 				or "Auto (Secret = Crystals,Normal = Gems)"
-			local hasSecondEnchantTarget = targetEnchantTwo ~= "" and targetEnchantTwo ~= "(None - single target)"
 			local equippedPetIds = getEnchantablePets()
-			for loopSlotH, equippedPetId in ipairs(equippedPetIds) do
-				if not Config.autoEnchant then
+			for _, equippedPetId in ipairs(equippedPetIds) do
+				if not Config.autoEnchant or not isCurrentRun() then
 					break
 				end
-				local petData = getEnchantCurrency(equippedPetId)
-				if petData and petData.Super ~= true and petData.IsSuper ~= true then
-					local canUseDualEnchant = canPetUseDualEnchantMode(petData)
-					while Config.autoEnchant do
-						petData = getEnchantCurrency(equippedPetId)
-						if not petData then
-							break
-						end
-						local hasTargetEnchantOne = getPetEnchantInfo(petData, targetEnchantOne, targetEnchantLevel)
-						local hasTargetEnchantTwo = hasSecondEnchantTarget
-								and getPetEnchantInfo(petData, targetEnchantTwo, targetEnchantLevel)
-							or nil
-						local targetEnchantSatisfied = false
-						if hasSecondEnchantTarget and canUseDualEnchant then
-							targetEnchantSatisfied = (hasTargetEnchantOne and hasTargetEnchantTwo) and true or false
-						elseif hasSecondEnchantTarget then
-							targetEnchantSatisfied = (hasTargetEnchantOne or hasTargetEnchantTwo) and true or false
-						else
-							targetEnchantSatisfied = hasTargetEnchantOne ~= nil
-						end
-						if targetEnchantSatisfied then
-							break
-						end
-						local currentSlotForTargetOne = findPetEnchantSlot(petData, targetEnchantOne)
-						local currentSlotForTargetTwo = hasSecondEnchantTarget
-								and findPetEnchantSlot(petData, targetEnchantTwo)
-							or nil
-						local rerollSlot = nil
-						local targetEnchantForCurrency = targetEnchantOne
-						if hasSecondEnchantTarget and canUseDualEnchant then
-							if currentSlotForTargetOne and not currentSlotForTargetTwo then
-								rerollSlot = currentSlotForTargetOne
-								targetEnchantForCurrency = targetEnchantTwo
-							end
-							if currentSlotForTargetTwo and not currentSlotForTargetOne then
-								rerollSlot = currentSlotForTargetTwo
-								targetEnchantForCurrency = targetEnchantOne
-							end
-						end
-						local resolvedEnchantCurrency =
-							resolveEnchantCurrency(selectedEnchantCurrencyMode, targetEnchantForCurrency)
-						if resolvedEnchantCurrency == "Shadow Crystals" then
-							pcall(function()
-								remoteEvent:FireServer("UseShadowCrystal", equippedPetId, rerollSlot)
-							end)
-						elseif resolvedEnchantCurrency == "Reroll Orbs" then
-							pcall(function()
-								remoteFunction:InvokeServer("RerollEnchants", equippedPetId, "Powerup", rerollSlot)
-							end)
-						else
-							pcall(function()
-								remoteFunction:InvokeServer("RerollEnchants", equippedPetId, "Gems", rerollSlot)
-							end)
-						end
-						task.wait(0.55)
-						if not Config.autoEnchant then
-							break
-						end
-						petData = getEnchantCurrency(equippedPetId)
-						if petData then
-							hasTargetEnchantOne = getPetEnchantInfo(petData, targetEnchantOne, targetEnchantLevel)
-							hasTargetEnchantTwo = hasSecondEnchantTarget
-									and getPetEnchantInfo(petData, targetEnchantTwo, targetEnchantLevel)
-								or nil
-							local targetSatisfiedAfterReroll = false
-							if hasSecondEnchantTarget and canUseDualEnchant then
-								targetSatisfiedAfterReroll = (hasTargetEnchantOne and hasTargetEnchantTwo) and true
-									or false
-							elseif hasSecondEnchantTarget then
-								targetSatisfiedAfterReroll = (hasTargetEnchantOne or hasTargetEnchantTwo) and true
-									or false
-							else
-								targetSatisfiedAfterReroll = hasTargetEnchantOne ~= nil
-							end
-							if targetSatisfiedAfterReroll then
-								break
-							end
-						end
-						task.wait(0.2)
-					end
-				end
+				activeStates.BGSI_Lite_RerollEnchantPet(
+					tostring(equippedPetId),
+					targetEnchantOne,
+					targetEnchantTwo,
+					targetEnchantLevel,
+					selectedEnchantCurrencyMode
+				)
 				task.wait(0.05)
 			end
-			task.wait(0.3)
+			task.wait(3)
 		end
 		autoEnchantThreadRunning = false
 	end)
@@ -10083,7 +10418,7 @@ end
 task.spawn(function()
 	local lastAutoEnchantState = false
 	while isCurrentRun() do
-		task.wait(0.3)
+		task.wait(0.75)
 		if Config.autoEnchant and not lastAutoEnchantState then
 			getEnchantTargetList()
 		end
@@ -12292,11 +12627,13 @@ activeStates.BGSI_Lite_InstallPetWebhookListener = function()
 						activeStates.BGSI_Lite_DashboardBestHatchChance = dashboardOneInChance
 					end
 					local dashboardIsSuper = isSuperLegendaryWebhookPet(dashboardHatchPet, dashboardPetInfo)
-					local dashboardIsCelestial = dashboardHatchPet.Celestial == true
-						or (dashboardHatchPet.Pet and dashboardHatchPet.Pet.Celestial == true)
-						or (dashboardHatchPet.Data and dashboardHatchPet.Data.Celestial == true)
-					local dashboardRarity = dashboardIsCelestial and "Celestial"
-						or (dashboardIsSuper and "Super Legendary" or tostring(dashboardPetInfo.Rarity or "Unknown"))
+					local dashboardRarity = activeStates.BGSI_Lite_ResolvePetRarity(
+						dashboardHatchPet,
+						dashboardPetInfo
+					)
+					if dashboardIsSuper and dashboardRarity ~= "Celestial" then
+						dashboardRarity = "Super Legendary"
+					end
 					local dashboardTracksPet = dashboardRarity == "Secret"
 						or dashboardRarity == "Infinity"
 						or dashboardRarity == "Void"
