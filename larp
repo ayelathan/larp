@@ -50,8 +50,81 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.22.13"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.04"
+activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
+activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
+	activeStates.BGSI_Lite_DashboardLogSequence += 1
+	activeStates.BGSI_Lite_PendingDashboardLog = {
+		id = activeStates.BGSI_Lite_DashboardLogSequence,
+		message = tostring(message),
+		level = tostring(level or "info"),
+	}
+end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.23.04",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Super Legendary controls",
+				description = "The in-game Enchant tab can now select which Super Legendary enchants qualify for automatic team equipment.",
+				icon = "sparkles",
+			},
+		},
+	},
+	{
+		version = "2026.07.23.03",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Optional connection relay",
+				description = "connect.bat now enables sub-second dashboard controls and grouped multi-account command polling without changing normal direct sync.",
+				icon = "radio-tower",
+			},
+			{
+				title = "Instant action activity",
+				description = "Potion use and other live actions can reach the relay log and dashboard immediately.",
+				icon = "zap",
+			},
+		},
+	},
+	{
+		version = "2026.07.23.02",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Adaptive account automation",
+				description = "Hatch timing, potion refreshes, client recovery, and safe full-inventory cleanup now react to replicated game state.",
+				icon = "activity",
+			},
+			{
+				title = "More rewards covered",
+				description = "Daily rewards and available wheel spins now run alongside prize, index, chest, and mastery automation.",
+				icon = "gift",
+			},
+			{
+				title = "Dashboard controls expanded",
+				description = "Account roles and the new automation policies can be applied live without rejoining.",
+				icon = "settings",
+			},
+		},
+	},
+	{
+		version = "2026.07.23.01",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Smarter automation",
+				description = "Mastery, chest, and index rewards now follow replicated eligibility instead of repeatedly sending every possible request.",
+				icon = "gauge",
+			},
+			{
+				title = "Hatch recovery rebuilt",
+				description = "Auto hatch now watches real hatch progress and only repositions after a confirmed stall.",
+				icon = "refresh-cw",
+			},
+		},
+	},
 	{
 		version = "2026.07.22.13",
 		releasedAt = "July 22, 2026",
@@ -193,6 +266,9 @@ local defaultConfig = {
 	autoRiftEgg = false,
 	autoRiftEggSpawn = false,
 	autoHatch = false,
+	adaptiveHatch = true,
+	healthRecoveryEnabled = true,
+	accountRole = "Balanced",
 	noHatchAnim = false,
 	autoSpamR = false,
 	autoBounty = false,
@@ -204,6 +280,7 @@ local defaultConfig = {
 	potionLevel = 1,
 	potionUseAmount = 10,
 	potionAuto = false,
+	potionMaintainSeconds = 30,
 	autoEnchant = false,
 	autoPowerOrbEquipped = false,
 	equippedTargetEnchant = "secret-hunter",
@@ -218,11 +295,15 @@ local defaultConfig = {
 	equippedEnchantCurrency = "Auto (Secret = Crystals,Normal = Gems)",
 	autoPlaytime = false,
 	autoClaimPrizes = false,
+	autoDailyRewards = true,
+	autoWheelSpin = true,
 	autoClaimJuly4thRewards = false,
 	autoEquipBestPets = false,
 	autoUpgradeMastery = false,
 	autoCollectCoins = false,
 	autoUseFragments = false,
+	autoInventoryCleanup = true,
+	inventoryCleanupMinCopies = 10,
 	autoBuyFragments = true,
 	selectedFragments = {},
 	dashboardSyncEnabled = true,
@@ -344,20 +425,28 @@ end
 activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities = function(priorities)
 	local normalizedPriorities = {}
 	local seenPriorities = {}
+	local function addPriority(priorityKey)
+		priorityKey = tostring(priorityKey)
+		if
+			(
+				priorityKey == "hatch-blessing-plus"
+				or priorityKey == "luck-boost-plus"
+				or priorityKey == "hatch-blessing"
+				or priorityKey == "luck-boost"
+			)
+			and not seenPriorities[priorityKey]
+		then
+			seenPriorities[priorityKey] = true
+			table.insert(normalizedPriorities, priorityKey)
+		end
+	end
 	if type(priorities) == "table" then
 		for _, priorityKey in ipairs(priorities) do
-			priorityKey = tostring(priorityKey)
-			if
-				(
-					priorityKey == "hatch-blessing-plus"
-					or priorityKey == "luck-boost-plus"
-					or priorityKey == "hatch-blessing"
-					or priorityKey == "luck-boost"
-				)
-				and not seenPriorities[priorityKey]
-			then
-				seenPriorities[priorityKey] = true
-				table.insert(normalizedPriorities, priorityKey)
+			addPriority(priorityKey)
+		end
+		for priorityKey, selected in pairs(priorities) do
+			if type(priorityKey) == "string" and selected == true then
+				addPriority(priorityKey)
 			end
 		end
 	end
@@ -920,6 +1009,12 @@ pcall(function()
 	itemUtil = require(ReplicatedStorage.Shared.Utils.Stats.ItemUtil)
 end)
 pcall(function()
+	activeStates.BGSI_Lite_MasteryData = require(ReplicatedStorage.Shared.Data.Mastery)
+	activeStates.BGSI_Lite_IndexUtil = require(ReplicatedStorage.Shared.Utils.IndexUtil)
+	activeStates.BGSI_Lite_XLIndexTasks = require(ReplicatedStorage.Shared.Data.XLIndexTasks)
+	activeStates.BGSI_Lite_WorldData = require(ReplicatedStorage.Shared.Data.Worlds)
+end)
+pcall(function()
 	carnivalRebirthUtil = require(ReplicatedStorage.Shared.Utils.CarnivalRebirthUtil)
 end)
 pcall(function()
@@ -1017,10 +1112,11 @@ activeStates.BGSI_Lite_FindPetById = function(playerData, petId)
 	return nil
 end
 activeStates.BGSI_Lite_CleanupFullPetInventory = function()
-	if activeStates.BGSI_Lite_PetInventoryCleanupActive then
+	if Config.autoInventoryCleanup ~= true or activeStates.BGSI_Lite_PetInventoryCleanupActive then
 		return false
 	end
 	local playerData = profileStore:IsReady() and profileStore:Get() or nil
+	activeStates.BGSI_Lite_GetPetInventoryCapacity(playerData)
 	local inventoryFullOk, inventoryFull = pcall(function()
 		return activeStates.BGSI_Lite_PetStorageStatsUtil:IsInventoryFull(playerData)
 	end)
@@ -1045,7 +1141,7 @@ activeStates.BGSI_Lite_CleanupFullPetInventory = function()
 	end
 	local candidates = {}
 	for _, candidateGroup in pairs(candidateGroups) do
-		if candidateGroup.amount >= 10 then
+		if candidateGroup.amount >= math.max(2, math.floor(tonumber(Config.inventoryCleanupMinCopies) or 10)) then
 			table.insert(candidates, candidateGroup)
 		end
 	end
@@ -1099,7 +1195,10 @@ end
 task.spawn(function()
 	while isCurrentRun() do
 		task.wait(5)
-		if tick() - (tonumber(activeStates.BGSI_Lite_LastPetInventoryCleanup) or 0) >= 20 then
+		if
+			Config.autoInventoryCleanup == true
+			and tick() - (tonumber(activeStates.BGSI_Lite_LastPetInventoryCleanup) or 0) >= 20
+		then
 			pcall(activeStates.BGSI_Lite_CleanupFullPetInventory)
 		end
 	end
@@ -1145,15 +1244,33 @@ activeStates.BGSI_Lite_ApplyHatchAnimationSetting = function()
 	return true
 end
 activeStates.BGSI_Lite_ApplyHatchAnimationSetting()
+LocalPlayer.CharacterAdded:Connect(function()
+	if Config.healthRecoveryEnabled ~= true then
+		return
+	end
+	task.wait(1)
+	activeStates.BGSI_Lite_ForceAutoHatchTeleport = Config.autoHatch == true
+	activeStates.BGSI_Lite_ApplyHatchAnimationSetting()
+end)
 task.spawn(function()
 	while isCurrentRun() do
-		task.wait(0.5)
+		task.wait(Config.healthRecoveryEnabled == true and 0.5 or 1)
 		if
 			Config.noHatchAnim == true
 			and hatchEffectModule
 			and hatchEffectModule.Play ~= activeStates.BGSI_Lite_NoHatchAnimationPlay
 		then
 			activeStates.BGSI_Lite_ApplyHatchAnimationSetting()
+		end
+		if Config.healthRecoveryEnabled == true then
+			local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+			local screenGui = playerGui and playerGui:FindFirstChild("ScreenGui")
+			if screenGui == nil and playerGui then
+				screenGui = playerGui:WaitForChild("ScreenGui", 3)
+				if screenGui then
+					activeStates.BGSI_Lite_ApplyHatchAnimationSetting()
+				end
+			end
 		end
 	end
 end)
@@ -1631,7 +1748,10 @@ local function fireHatchEgg(scriptStateQC)
 	end
 
 	local requestTime = tick()
-	if requestTime - (tonumber(activeStates.BGSI_Lite_LastHatchAttemptAt) or 0) < 0.1 then
+	local minimumHatchDelay = Config.adaptiveHatch == true
+			and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1, 0.06, 0.25)
+		or 0.1
+	if requestTime - (tonumber(activeStates.BGSI_Lite_LastHatchAttemptAt) or 0) < minimumHatchDelay then
 		return false
 	end
 	activeStates.BGSI_Lite_LastHatchAttemptAt = requestTime
@@ -2270,11 +2390,16 @@ end
 local function spamClaimGiantChest(scriptStateAAP)
 	local scriptStateAEI = tick() + (scriptStateAAP or 5)
 	while tick() < scriptStateAEI do
-		pcall(function()
-			remoteEvent:FireServer("ClaimChest", "Giant Chest", true)
-			remoteEvent:FireServer("ClaimChest", "Giant Chest")
-		end)
-		task.wait(0.05)
+		local playerData = profileStore:IsReady() and profileStore:Get() or nil
+		local cooldownEndsAt = playerData
+			and type(playerData.Cooldowns) == "table"
+			and tonumber(playerData.Cooldowns["Giant Chest"])
+			or 0
+		if cooldownEndsAt > getCurrentTimestamp() then
+			return
+		end
+		pcall(remoteEvent.FireServer, remoteEvent, "ClaimChest", "Giant Chest", true)
+		task.wait(0.5)
 	end
 end
 local scriptStateHD = 200
@@ -4724,6 +4849,14 @@ do
 			saveConfig()
 		end,
 	})
+	eggTab:AddToggle("AdaptiveHatch", {
+		Title = "Adaptive Hatch Timing",
+		Default = Config.adaptiveHatch,
+		Callback = function(isEnabled)
+			Config.adaptiveHatch = isEnabled
+			saveConfig()
+		end,
+	})
 	eggTab:AddToggle("NoHatchAnim", {
 		Title = "No Hatch Animation",
 		Default = Config.noHatchAnim,
@@ -4861,18 +4994,40 @@ task.spawn(function()
 	end
 end)
 task.spawn(function()
-	local scriptStateAFX = 0
+	local lastAutoHatchTeleportAt = 0
 	local autoHatchStartedAt = 0
 	local lastHatchRecoveryAt = 0
+	local lastHatchProgressAt = 0
+	local lastHatchSampleAt = 0
+	local observedHatchCount
+	local lastSelectedEgg
+	activeStates.BGSI_Lite_AdaptiveHatchDelay = math.clamp(
+		tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1,
+		0.06,
+		0.25
+	)
 	while isCurrentRun() do
-		task.wait(Config.autoHatch and 0.1 or 0.85)
+		task.wait(
+			Config.autoHatch
+					and (
+						Config.adaptiveHatch == true
+								and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1, 0.06, 0.25)
+							or 0.1
+					)
+				or 0.85
+		)
 		if Config.autoHatch ~= true then
-			scriptStateAFX = 0
+			lastAutoHatchTeleportAt = 0
 			autoHatchStartedAt = 0
+			lastHatchProgressAt = 0
+			lastHatchSampleAt = 0
+			observedHatchCount = nil
+			lastSelectedEgg = nil
 			continue
 		end
 		if autoHatchStartedAt == 0 then
 			autoHatchStartedAt = tick()
+			lastHatchProgressAt = autoHatchStartedAt
 		end
 		clearDisabledPriorityStates()
 		if
@@ -4892,18 +5047,60 @@ task.spawn(function()
 		if type(scriptStateEL) ~= "string" or scriptStateEL == "" then
 			continue
 		end
-		if activeStates.BGSI_Lite_ForceAutoHatchTeleport or tick() - scriptStateAFX >= 10 then
-			activeStates.BGSI_Lite_ForceAutoHatchTeleport = false
-			local teleportSucceeded = false
-			pcall(function()
-				teleportSucceeded = teleportToEggByName(scriptStateEL)
-			end)
-			scriptStateAFX = teleportSucceeded and tick() or tick() - 8.5
+		if lastSelectedEgg ~= scriptStateEL then
+			lastSelectedEgg = scriptStateEL
+			lastAutoHatchTeleportAt = 0
+			lastHatchProgressAt = tick()
+			observedHatchCount = nil
 		end
-		local lastHatchAt = math.max(autoHatchStartedAt, tonumber(activeStates.BGSI_Lite_LastHatchEventAt) or 0)
-		if tick() - lastHatchAt >= 12 and tick() - lastHatchRecoveryAt >= 10 then
+		if tick() - lastHatchSampleAt >= 0.5 then
+			lastHatchSampleAt = tick()
+			local playerData = profileStore:IsReady() and profileStore:Get() or nil
+			local hatchCount = playerData
+				and type(playerData.Stats) == "table"
+				and tonumber(playerData.Stats.Hatches)
+				or nil
+			if hatchCount and observedHatchCount and hatchCount ~= observedHatchCount then
+				lastHatchProgressAt = tick()
+				if Config.adaptiveHatch == true then
+					activeStates.BGSI_Lite_AdaptiveHatchDelay =
+						math.max(0.06, (tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1) - 0.005)
+				end
+			elseif Config.adaptiveHatch == true and tick() - lastHatchProgressAt >= 2 then
+				activeStates.BGSI_Lite_AdaptiveHatchDelay =
+					math.min(0.25, (tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.1) + 0.01)
+			end
+			observedHatchCount = hatchCount or observedHatchCount
+		end
+		lastHatchProgressAt = math.max(
+			lastHatchProgressAt,
+			autoHatchStartedAt,
+			tonumber(activeStates.BGSI_Lite_LastHatchEventAt) or 0
+		)
+		local controllerIsHatching = false
+		if hatchEffectModule and type(hatchEffectModule.IsHatching) == "function" then
+			pcall(function()
+				controllerIsHatching = hatchEffectModule:IsHatching() == true
+			end)
+		end
+		local stallTimeout = controllerIsHatching and 20 or 12
+		if tick() - lastHatchProgressAt >= stallTimeout and tick() - lastHatchRecoveryAt >= 10 then
 			activeStates.BGSI_Lite_ForceAutoHatchTeleport = true
 			lastHatchRecoveryAt = tick()
+			lastHatchProgressAt = tick()
+		end
+		if
+			lastAutoHatchTeleportAt == 0
+			or (
+				activeStates.BGSI_Lite_ForceAutoHatchTeleport
+				and tick() - lastAutoHatchTeleportAt >= 2
+			)
+		then
+			activeStates.BGSI_Lite_ForceAutoHatchTeleport = false
+			pcall(function()
+				teleportToEggByName(scriptStateEL)
+			end)
+			lastAutoHatchTeleportAt = tick()
 		end
 		fireHatchEgg(scriptStateEL)
 	end
@@ -5782,12 +5979,22 @@ do
 	-- Chest helper: attempts to claim the named chest with the supported remotes.
 	local function claimChestByName(chestName)
 		if type(chestName) ~= "string" or chestName == "" then
-			return
+			return false
 		end
-		pcall(function()
-			remoteEvent:FireServer("ClaimChest", chestName, true)
-			remoteEvent:FireServer("ClaimChest", chestName)
-		end)
+		local playerData = profileStore:IsReady() and profileStore:Get() or nil
+		local cooldownEndsAt = playerData
+			and type(playerData.Cooldowns) == "table"
+			and tonumber(playerData.Cooldowns[chestName])
+			or 0
+		if cooldownEndsAt > getCurrentTimestamp() then
+			return false
+		end
+		activeStates.BGSI_Lite_ChestClaimAttempts = activeStates.BGSI_Lite_ChestClaimAttempts or {}
+		if tick() - (activeStates.BGSI_Lite_ChestClaimAttempts[chestName] or 0) < 5 then
+			return false
+		end
+		activeStates.BGSI_Lite_ChestClaimAttempts[chestName] = tick()
+		return pcall(remoteEvent.FireServer, remoteEvent, "ClaimChest", chestName, true)
 	end
 	local worldChestList = getWorldChestNames()
 	if Config.selectedWorldChest == "Giant Chest" and table.find(worldChestList, Config.selectedChest) then
@@ -6343,6 +6550,17 @@ do
 			saveConfig()
 		end,
 	})
+	scriptStateYT:AddSlider("PotionMaintainSeconds", {
+		Title = "Refresh Before Expiry",
+		Min = 0,
+		Max = 120,
+		Default = Config.potionMaintainSeconds,
+		Rounding = 0,
+		Callback = function(seconds)
+			Config.potionMaintainSeconds = math.clamp(math.floor(tonumber(seconds) or 30), 0, 120)
+			saveConfig()
+		end,
+	})
 	scriptStateYT:AddToggle("AutoUsePotions", {
 		Title = "Auto Use Potions",
 		Default = Config.potionAuto,
@@ -6351,13 +6569,80 @@ do
 			saveConfig()
 		end,
 	})
+	activeStates.BGSI_Lite_GetPotionRemainingSeconds = function(playerData, potionType, potionLevel)
+		local activePotions = type(playerData) == "table" and playerData.ActivePotions or nil
+		if type(activePotions) ~= "table" then
+			return 0
+		end
+		local remainingSeconds = 0
+		for potionKey, potionInfo in pairs(activePotions) do
+			local potionName = type(potionInfo) == "table"
+					and tostring(potionInfo.Type or potionInfo.Name or potionInfo.Potion or potionKey)
+				or tostring(potionKey)
+			local level = type(potionInfo) == "table"
+					and tonumber(potionInfo.Level or potionInfo.Tier)
+				or tonumber(string.match(potionName, "%d+"))
+			if
+				string.find(string.lower(potionName), string.lower(tostring(potionType)), 1, true)
+				and (level == nil or level >= (tonumber(potionLevel) or 1))
+			then
+				local expiresAt = type(potionInfo) == "table"
+						and tonumber(
+							potionInfo.ExpiresAt
+								or potionInfo.ExpireAt
+								or potionInfo.EndTime
+								or potionInfo.Time
+								or potionInfo.Duration
+						)
+					or tonumber(potionInfo)
+				if expiresAt then
+					local remaining = expiresAt > getCurrentTimestamp() and expiresAt - getCurrentTimestamp() or expiresAt
+					remainingSeconds = math.max(remainingSeconds, remaining)
+				end
+			end
+		end
+		return math.max(0, remainingSeconds)
+	end
 	task.spawn(function()
 		while isCurrentRun() do
-			task.wait(Config.potionAuto and 0.15 or 0.85)
+			task.wait(Config.potionAuto and 5 or 0.85)
 			if Config.potionAuto then
-				pcall(function()
-					remoteEvent:FireServer("UsePotion", Config.potionType, Config.potionLevel, Config.potionUseAmount)
-				end)
+				local playerData = profileStore:IsReady() and profileStore:Get() or nil
+				local remainingSeconds =
+					activeStates.BGSI_Lite_GetPotionRemainingSeconds(playerData, Config.potionType, Config.potionLevel)
+				local maintainSeconds = math.max(5, tonumber(Config.potionMaintainSeconds) or 30)
+				local potionAmount = math.max(1, math.floor(tonumber(Config.potionUseAmount) or 1))
+				local potionDuration = type(sharedConstants) == "table"
+						and type(sharedConstants.PotionDuration) == "table"
+						and tonumber(sharedConstants.PotionDuration[tonumber(Config.potionLevel) or 1])
+					or 120
+				local retryAfter = math.max(30, potionDuration * potionAmount - maintainSeconds)
+				if
+					remainingSeconds <= maintainSeconds
+					and tick() - (tonumber(activeStates.BGSI_Lite_LastAutoPotionUseAt) or 0) >= retryAfter
+				then
+					activeStates.BGSI_Lite_LastAutoPotionUseAt = tick()
+					local useSucceeded = pcall(
+						remoteEvent.FireServer,
+						remoteEvent,
+						"UsePotion",
+						Config.potionType,
+						Config.potionLevel,
+						potionAmount
+					)
+					if useSucceeded and type(activeStates.BGSI_Lite_LogDashboardAction) == "function" then
+						activeStates.BGSI_Lite_LogDashboardAction(
+							"Using "
+								.. tostring(potionAmount)
+								.. "x "
+								.. tostring(Config.potionType)
+								.. " "
+								.. tostring(Config.potionLevel),
+							"collect"
+						)
+					end
+					task.wait(2)
+				end
 			end
 		end
 	end)
@@ -6767,6 +7052,169 @@ do
 			end
 		end
 	end
+	activeStates.BGSI_Lite_ClaimIndexRewards = function()
+		local playerData = profileStore:IsReady() and profileStore:Get() or nil
+		local indexUtil = activeStates.BGSI_Lite_IndexUtil
+		if type(playerData) ~= "table" or type(indexUtil) ~= "table" then
+			return
+		end
+		local claimedEggPrizes = type(playerData.EggPrizesClaimed) == "table" and playerData.EggPrizesClaimed
+			or {}
+		local openedEggs = type(playerData.EggsOpened) == "table" and playerData.EggsOpened or {}
+		for eggName, eggInfo in pairs(type(eggDataModule) == "table" and eggDataModule or {}) do
+			if openedEggs[eggName] ~= nil and type(eggInfo) == "table" and eggInfo.World and eggInfo.Reward then
+				for _, indexMode in ipairs({ "Normal", "Shiny" }) do
+					local claimKey = (indexMode == "Shiny" and "S" or "") .. tostring(eggName)
+					if claimedEggPrizes[claimKey] == nil then
+						local completedOk, completed = pcall(
+							indexUtil.GetEggCompleted,
+							indexUtil,
+							playerData,
+							eggInfo.World,
+							indexMode,
+							eggName
+						)
+						if
+							completedOk
+							and type(completed) == "table"
+							and math.max(0, (tonumber(completed.Total) or 0) - (tonumber(completed.Found) or 0)) == 0
+						then
+							remoteEvent:FireServer("EggPrizeClaim", eggName, indexMode == "Shiny")
+							task.wait(0.1)
+						end
+					end
+				end
+			end
+		end
+		local discoveredXL = {}
+		pcall(function()
+			discoveredXL = indexUtil:GetXLDiscovered(playerData)
+		end)
+		for taskName, taskInfo in pairs(
+			type(activeStates.BGSI_Lite_XLIndexTasks) == "table" and activeStates.BGSI_Lite_XLIndexTasks or {}
+		) do
+			if
+				type(taskInfo) == "table"
+				and not table.find(type(playerData.XLIndexClaimed) == "table" and playerData.XLIndexClaimed or {}, taskName)
+			then
+				local progressOk, progress = pcall(indexUtil.GetXLTaskProgress, indexUtil, discoveredXL, taskName)
+				if progressOk and (tonumber(progress) or 0) >= (tonumber(taskInfo.Amount) or math.huge) then
+					remoteEvent:FireServer("ClaimXLIndexRewards", taskName)
+					task.wait(0.1)
+				end
+			end
+		end
+		activeStates.BGSI_Lite_IndexClaimAttempts = activeStates.BGSI_Lite_IndexClaimAttempts or {}
+		for worldName, worldInfo in pairs(
+			type(activeStates.BGSI_Lite_WorldData) == "table" and activeStates.BGSI_Lite_WorldData or {}
+		) do
+			if
+				type(worldInfo) == "table"
+				and worldInfo.IndexLocked == nil
+				and type(playerData.WorldsUnlocked) == "table"
+				and playerData.WorldsUnlocked[worldName] ~= nil
+			then
+				for _, indexMode in ipairs({ "Normal", "Shiny" }) do
+					local claimKey = (indexMode == "Shiny" and "Shiny" or "") .. tostring(worldName)
+					if
+						type(playerData.ClaimedIndex) == "table"
+						and playerData.ClaimedIndex[claimKey] == nil
+						and tick() - (activeStates.BGSI_Lite_IndexClaimAttempts[claimKey] or 0) >= 60
+					then
+						activeStates.BGSI_Lite_IndexClaimAttempts[claimKey] = tick()
+						remoteEvent:FireServer("ClaimIndex", worldName, indexMode)
+						task.wait(0.1)
+					end
+				end
+			end
+		end
+	end
+	activeStates.BGSI_Lite_TryUpgradeMastery = function()
+		local playerData = profileStore:IsReady() and profileStore:Get() or nil
+		local masteryData = activeStates.BGSI_Lite_MasteryData
+		if
+			type(playerData) ~= "table"
+			or type(masteryData) ~= "table"
+			or type(masteryData.Upgrades) ~= "table"
+			or type(itemUtil) ~= "table"
+			or type(itemUtil.CanAfford) ~= "function"
+		then
+			return false
+		end
+		for _, masteryName in ipairs(scriptStateBY) do
+			local masteryInfo = masteryData.Upgrades[masteryName]
+			local currentLevel = type(playerData.MasteryLevels) == "table"
+					and math.max(0, math.floor(tonumber(playerData.MasteryLevels[masteryName]) or 0))
+				or 0
+			local nextLevel = type(masteryInfo) == "table"
+				and type(masteryInfo.Levels) == "table"
+				and masteryInfo.Levels[currentLevel + 1]
+				or nil
+			if type(nextLevel) == "table" and type(nextLevel.Cost) == "table" then
+				local canAffordOk, canAfford = pcall(itemUtil.CanAfford, itemUtil, playerData, nextLevel.Cost)
+				if canAffordOk and canAfford then
+					remoteEvent:FireServer("UpgradeMastery", masteryName)
+					local updateDeadline = tick() + 2
+					repeat
+						task.wait(0.1)
+						playerData = profileStore:IsReady() and profileStore:Get() or nil
+					until not Config.autoUpgradeMastery
+						or type(playerData) ~= "table"
+						or (
+							type(playerData.MasteryLevels) == "table"
+							and (tonumber(playerData.MasteryLevels[masteryName]) or 0) > currentLevel
+						)
+						or tick() >= updateDeadline
+					return true
+				end
+			end
+		end
+		return false
+	end
+	activeStates.BGSI_Lite_ClaimDailyAndWheelRewards = function()
+		local playerData = profileStore:IsReady() and profileStore:Get() or nil
+		if type(playerData) ~= "table" then
+			return
+		end
+		if Config.autoDailyRewards == true then
+			local dailyRewards = type(playerData.DailyRewards) == "table" and playerData.DailyRewards or nil
+			local absoluteDay
+			pcall(function()
+				absoluteDay = timeModule.getAbsoluteDay()
+			end)
+			if
+				dailyRewards
+				and dailyRewards.Claimed ~= true
+				and (
+					absoluteDay == nil
+					or (tonumber(dailyRewards.LastDay) or -1) >= absoluteDay
+				)
+				and tick() - (tonumber(activeStates.BGSI_Lite_LastDailyRewardAttempt) or 0) >= 30
+			then
+				activeStates.BGSI_Lite_LastDailyRewardAttempt = tick()
+				remoteEvent:FireServer("DailyRewardClaimStars")
+			end
+		end
+		if Config.autoWheelSpin == true then
+			if tick() - (tonumber(activeStates.BGSI_Lite_LastFreeWheelAttempt) or 0) >= 60 then
+				activeStates.BGSI_Lite_LastFreeWheelAttempt = tick()
+				remoteEvent:FireServer("ClaimFreeWheelSpin")
+			end
+			local spinTickets = getInventoryItemAmount("Spin Ticket")
+			local nextFreeSpinAt = tonumber(playerData.NextWheelSpin) or math.huge
+			if
+				(spinTickets > 0 or nextFreeSpinAt <= getCurrentTimestamp())
+				and tick() - (tonumber(activeStates.BGSI_Lite_LastWheelSpinAttempt) or 0) >= 8
+			then
+				activeStates.BGSI_Lite_LastWheelSpinAttempt = tick()
+				local spinOk, spinResult = pcall(remoteFunction.InvokeServer, remoteFunction, "WheelSpin")
+				if spinOk and spinResult ~= nil then
+					task.wait(0.2)
+					remoteEvent:FireServer("ClaimWheelSpinQueue")
+				end
+			end
+		end
+	end
 	local function useFragment(fragmentType)
 		local playerData = profileStore:IsReady() and profileStore:Get() or nil
 		local usedFragments = playerData and playerData.Fragments or {}
@@ -6809,6 +7257,59 @@ do
 		Default = Config.autoClaimPrizes,
 		Callback = function(isEnabled)
 			Config.autoClaimPrizes = isEnabled
+			saveConfig()
+		end,
+	})
+	gameTab:AddToggle("AutoDailyRewards", {
+		Title = "Auto Daily Rewards",
+		Default = Config.autoDailyRewards,
+		Callback = function(isEnabled)
+			Config.autoDailyRewards = isEnabled
+			saveConfig()
+		end,
+	})
+	gameTab:AddToggle("AutoWheelSpin", {
+		Title = "Auto Wheel Spins",
+		Default = Config.autoWheelSpin,
+		Callback = function(isEnabled)
+			Config.autoWheelSpin = isEnabled
+			saveConfig()
+		end,
+	})
+	gameTab:AddToggle("AutoInventoryCleanup", {
+		Title = "Safe Inventory Cleanup",
+		Default = Config.autoInventoryCleanup,
+		Callback = function(isEnabled)
+			Config.autoInventoryCleanup = isEnabled
+			saveConfig()
+		end,
+	})
+	gameTab:AddSlider("InventoryCleanupMinCopies", {
+		Title = "Cleanup Minimum Copies",
+		Min = 2,
+		Max = 100,
+		Default = Config.inventoryCleanupMinCopies,
+		Rounding = 0,
+		Callback = function(amount)
+			Config.inventoryCleanupMinCopies = math.clamp(math.floor(tonumber(amount) or 10), 2, 100)
+			saveConfig()
+		end,
+	})
+	gameTab:AddToggle("HealthRecoveryEnabled", {
+		Title = "Client Recovery",
+		Default = Config.healthRecoveryEnabled,
+		Callback = function(isEnabled)
+			Config.healthRecoveryEnabled = isEnabled
+			saveConfig()
+		end,
+	})
+	gameTab:AddDropdown("AccountRole", {
+		Title = "Account Role",
+		Values = { "Balanced", "Hatcher", "Quest", "Farmer" },
+		Default = Config.accountRole,
+		Multi = false,
+		Callback = function(role)
+			Config.accountRole = role
 			saveConfig()
 		end,
 	})
@@ -7473,9 +7974,9 @@ do
 	end)
 	task.spawn(function()
 		while isCurrentRun() do
-			task.wait(Config.autoClaimPrizes and 2 or 0.85)
-			if Config.autoClaimPrizes then
-				pcall(claimAvailablePrizes)
+			task.wait((Config.autoDailyRewards or Config.autoWheelSpin) and 5 or 0.85)
+			if Config.autoDailyRewards or Config.autoWheelSpin then
+				pcall(activeStates.BGSI_Lite_ClaimDailyAndWheelRewards)
 			end
 		end
 	end)
@@ -7643,6 +8144,37 @@ do
 			local httpTable = rawget(activeStates, "http")
 			dashboardRequest = type(httpTable) == "table" and rawget(httpTable, "request") or nil
 		end
+		local function sendDashboardHeartbeat(encodedPayload, useRelay)
+			local requestOk, response = pcall(dashboardRequest, {
+				Url = useRelay and "http://127.0.0.1:17676/v1/heartbeat" or dashboardEndpoint,
+				Method = "POST",
+				Headers = {
+					["Content-Type"] = "application/json",
+					["Authorization"] = "Bearer " .. dashboardIngestToken,
+					["X-Larplite-Protocol"] = "2",
+					["X-Larplite-Upstream"] = dashboardEndpoint,
+				},
+				Body = encodedPayload,
+				Timeout = useRelay and 1 or 15,
+			})
+			local statusCode = requestOk
+					and type(response) == "table"
+					and tonumber(response.StatusCode or response.Status or response.status_code)
+				or nil
+			local responseBody = requestOk
+					and type(response) == "table"
+					and tostring(response.Body or response.body or "")
+				or ""
+			local responsePayload
+			pcall(function()
+				responsePayload = HttpService:JSONDecode(responseBody)
+			end)
+			local syncSucceeded = requestOk
+				and (not statusCode or (statusCode >= 200 and statusCode < 300))
+				and type(responsePayload) == "table"
+				and responsePayload.ok == true
+			return syncSucceeded, response, statusCode, responseBody, responsePayload
+		end
 		local lastInventorySync = tick() - 110 + (LocalPlayer.UserId % 20)
 		activeStates.BGSI_Lite_DashboardPlayerDetailsSync = tick() - 50 + (LocalPlayer.UserId % 15)
 		local lastDashboardState
@@ -7659,6 +8191,8 @@ do
 			activeStates.BGSI_Lite_PendingReloadConfirmation = nil
 		end
 		activeStates.BGSI_Lite_PendingDashboardReload = nil
+		activeStates.BGSI_Lite_DashboardRelayAvailable = false
+		activeStates.BGSI_Lite_DashboardRelayProbeAt = 0
 		local lastInventorySignature
 		activeStates.BGSI_Lite_DashboardPlayerDetailsSignature = nil
 		local dashboardConfigKeys = {
@@ -7693,12 +8227,20 @@ do
 			"potionType",
 			"potionLevel",
 			"potionUseAmount",
+			"potionMaintainSeconds",
 			"potionAuto",
 
 			-- General game automation
+			"accountRole",
+			"adaptiveHatch",
+			"healthRecoveryEnabled",
 			"autoPlaytime",
 			"autoClaimPrizes",
+			"autoDailyRewards",
+			"autoWheelSpin",
 			"autoClaimJuly4thRewards",
+			"autoInventoryCleanup",
+			"inventoryCleanupMinCopies",
 			"autoEquipBestPets",
 			"autoUpgradeMastery",
 			"autoPowerOrbEquipped",
@@ -8701,10 +9243,16 @@ do
 								activeStates.BGSI_Lite_DashboardPlayerDetailsSignature =
 									activeStates.BGSI_Lite_DashboardCurrentPlayerDetailsSignature
 							end
-							if currentState ~= lastDashboardState then
+							if type(activeStates.BGSI_Lite_PendingDashboardLog) == "table" then
+								payload.log = tostring(activeStates.BGSI_Lite_PendingDashboardLog.message or "")
+								payload.logLevel = tostring(activeStates.BGSI_Lite_PendingDashboardLog.level or "info")
+								activeStates.BGSI_Lite_SentDashboardLogId =
+									tonumber(activeStates.BGSI_Lite_PendingDashboardLog.id)
+							elseif currentState ~= lastDashboardState then
 								payload.log = dashboardActivity
 								payload.logLevel = dashboardActivityLevel
 								lastDashboardState = currentState
+								activeStates.BGSI_Lite_SentDashboardLogId = nil
 							end
 
 							local encodedPayload = HttpService:JSONEncode(payload)
@@ -8728,40 +9276,53 @@ do
 								activeStates.BGSI_Lite_DashboardPlayerDetailsSignature = nil
 							end
 
-							local requestOk, response = pcall(dashboardRequest, {
-								Url = dashboardEndpoint,
-								Method = "POST",
-								Headers = {
-									["Content-Type"] = "application/json",
-									["Authorization"] = "Bearer " .. dashboardIngestToken,
-									["X-Larplite-Protocol"] = "2",
-								},
-								Body = encodedPayload,
-								Timeout = 15,
-							})
-							local statusCode = requestOk
-									and type(response) == "table"
-									and tonumber(response.StatusCode or response.Status or response.status_code)
-								or nil
-							local responseBody = requestOk
-									and type(response) == "table"
-									and tostring(response.Body or response.body or "")
-								or ""
-							local responsePayload
-							pcall(function()
-								responsePayload = HttpService:JSONDecode(responseBody)
-							end)
-							local syncSucceeded = requestOk
-								and (not statusCode or (statusCode >= 200 and statusCode < 300))
-								and type(responsePayload) == "table"
-								and responsePayload.ok == true
+							local useDashboardRelay = activeStates.BGSI_Lite_DashboardRelayAvailable == true
+								or tick() - (tonumber(activeStates.BGSI_Lite_DashboardRelayProbeAt) or 0) >= 10
+							if useDashboardRelay then
+								activeStates.BGSI_Lite_DashboardRelayProbeAt = tick()
+							end
+							local syncSucceeded, response, statusCode, responseBody, responsePayload =
+								sendDashboardHeartbeat(encodedPayload, useDashboardRelay)
+							if useDashboardRelay and syncSucceeded and responsePayload.relay == true then
+								if activeStates.BGSI_Lite_DashboardRelayAvailable ~= true then
+									print(
+										"["
+											.. LocalPlayer.Name
+											.. "] Connection relay detected. Fast dashboard controls enabled."
+									)
+								end
+								activeStates.BGSI_Lite_DashboardRelayAvailable = true
+							elseif useDashboardRelay then
+								if activeStates.BGSI_Lite_DashboardRelayAvailable == true then
+									print(
+										"["
+											.. LocalPlayer.Name
+											.. "] Connection relay closed. Returning to direct dashboard sync."
+									)
+								end
+								activeStates.BGSI_Lite_DashboardRelayAvailable = false
+								syncSucceeded, response, statusCode, responseBody, responsePayload =
+									sendDashboardHeartbeat(encodedPayload, false)
+							end
 							if syncSucceeded then
-								dashboardSyncDelay = math.max(3, tonumber(responsePayload.heartbeatSeconds) or 5)
-									+ ((LocalPlayer.UserId % 100) / 100)
+								if responsePayload.relay == true then
+									dashboardSyncDelay =
+										math.max(0.35, tonumber(responsePayload.heartbeatSeconds) or 0.5)
+								else
+									dashboardSyncDelay = math.max(3, tonumber(responsePayload.heartbeatSeconds) or 5)
+										+ ((LocalPlayer.UserId % 100) / 100)
+								end
 								if not dashboardConnected then
 									print("[" .. LocalPlayer.Name .. "] Account Dashboard connected.")
 								end
 								dashboardConnected = true
+								if
+									type(activeStates.BGSI_Lite_PendingDashboardLog) == "table"
+									and tonumber(activeStates.BGSI_Lite_PendingDashboardLog.id)
+										== tonumber(activeStates.BGSI_Lite_SentDashboardLogId)
+								then
+									activeStates.BGSI_Lite_PendingDashboardLog = nil
+								end
 								pendingDashboardCommandResults = {}
 								for _ = 1, sentDashboardHatchCount do
 									table.remove(pendingDashboardHatches, 1)
@@ -9309,17 +9870,21 @@ do
 	end)
 	task.spawn(function()
 		while isCurrentRun() do
-			task.wait(Config.autoUpgradeMastery and 2 or 0.85)
+			task.wait(Config.autoUpgradeMastery and 1 or 0.85)
 			if Config.autoUpgradeMastery then
-				for thangsCategoryIndex, scriptStateNK in ipairs(scriptStateBY) do
-					if not Config.autoUpgradeMastery then
-						break
-					end
-					pcall(function()
-						remoteEvent:FireServer("UpgradeMastery", scriptStateNK)
-					end)
-					task.wait(0.25)
+				local upgradeOk, upgraded = pcall(activeStates.BGSI_Lite_TryUpgradeMastery)
+				if not upgradeOk or not upgraded then
+					task.wait(5)
 				end
+			end
+		end
+	end)
+	task.spawn(function()
+		while isCurrentRun() do
+			task.wait(Config.autoClaimPrizes and 5 or 0.85)
+			if Config.autoClaimPrizes then
+				pcall(claimAvailablePrizes)
+				pcall(activeStates.BGSI_Lite_ClaimIndexRewards)
 			end
 		end
 	end)
@@ -9456,6 +10021,58 @@ do
 		Callback = function(scriptStateADD)
 			Config.autoEnchant = scriptStateADD
 			activeStates.BGSI_Lite_AutoEnchantBlockedUntil = 0
+			activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = 0
+			saveConfig()
+		end,
+	})
+	scriptStateTJ:AddDropdown("SuperLegendaryEnchants", {
+		Title = "Equip Super Legendaries",
+		Description = "Select qualifying enchants. Plus variants are equipped first.",
+		Values = {
+			"Hatch Blessing Plus",
+			"Luck Boost Plus",
+			"Hatch Blessing",
+			"Luck Boost",
+		},
+		Default = (function()
+			local selectedEnchantLabels = {}
+			local enchantLabelByKey = {
+				["hatch-blessing-plus"] = "Hatch Blessing Plus",
+				["luck-boost-plus"] = "Luck Boost Plus",
+				["hatch-blessing"] = "Hatch Blessing",
+				["luck-boost"] = "Luck Boost",
+			}
+			for _, enchantKey in ipairs(Config.superLegendaryEnchantPriorities) do
+				if enchantLabelByKey[enchantKey] then
+					table.insert(selectedEnchantLabels, enchantLabelByKey[enchantKey])
+				end
+			end
+			return selectedEnchantLabels
+		end)(),
+		Multi = true,
+		Callback = function(selectedEnchantLabels)
+			local enchantKeyByLabel = {
+				["Hatch Blessing Plus"] = "hatch-blessing-plus",
+				["Luck Boost Plus"] = "luck-boost-plus",
+				["Hatch Blessing"] = "hatch-blessing",
+				["Luck Boost"] = "luck-boost",
+			}
+			local selectedEnchantPriorities = {}
+			for _, enchantLabel in ipairs(type(selectedEnchantLabels) == "table" and selectedEnchantLabels or {}) do
+				if enchantKeyByLabel[enchantLabel] then
+					table.insert(selectedEnchantPriorities, enchantKeyByLabel[enchantLabel])
+				end
+			end
+			for enchantLabel, selected in pairs(
+				type(selectedEnchantLabels) == "table" and selectedEnchantLabels or {}
+			) do
+				local enchantKey = type(enchantLabel) == "string" and enchantKeyByLabel[enchantLabel] or nil
+				if enchantKey and selected == true and not table.find(selectedEnchantPriorities, enchantKey) then
+					table.insert(selectedEnchantPriorities, enchantKey)
+				end
+			end
+			Config.superLegendaryEnchantPriorities =
+				activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(selectedEnchantPriorities)
 			activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = 0
 			saveConfig()
 		end,
@@ -10127,9 +10744,12 @@ local function prepareAutoEnchantTeam()
 		local rarity = petInfo and petInfo.Rarity
 		local superEnchantPriorityIndex
 		local superEnchantMatchCount = 0
-		local isSuperLegendary = pet.Super == true or pet.IsSuper == true
+		local isSuperLegendary = pet.Super == true
+			or pet.IsSuper == true
+			or rarity == "Super"
+			or rarity == "Super Legendary"
 		if isSuperLegendary then
-			for _, enchantEntry in ipairs(type(pet.Enchants) == "table" and pet.Enchants or {}) do
+			for _, enchantEntry in ipairs(getPetEnchantList(pet)) do
 				local enchantKey = getSuperLegendaryEnchantPriorityKey(enchantEntry)
 				local priorityIndex = enchantKey and superEnchantPriorityIndexes[enchantKey]
 				if priorityIndex and (not superEnchantPriorityIndex or priorityIndex < superEnchantPriorityIndex) then
@@ -10188,7 +10808,12 @@ local function prepareAutoEnchantTeam()
 			break
 		end
 		local petId = tostring(candidate.pet.Id or "")
-		local isSuperLegendary = candidate.pet.Super == true or candidate.pet.IsSuper == true
+		local candidatePetInfo = type(petRarityData) == "table" and petRarityData[candidate.pet.Name] or nil
+		local candidateRarity = candidatePetInfo and candidatePetInfo.Rarity
+		local isSuperLegendary = candidate.pet.Super == true
+			or candidate.pet.IsSuper == true
+			or candidateRarity == "Super"
+			or candidateRarity == "Super Legendary"
 		if petId ~= "" and (not isSuperLegendary or selectedSuperCount < maxSupersEquipped) then
 			table.insert(selectedPetIds, petId)
 			selectedPetIdSet[petId] = true
