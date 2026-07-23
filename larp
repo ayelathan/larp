@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.09"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.23.11"
 activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
 activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	activeStates.BGSI_Lite_DashboardLogSequence += 1
@@ -61,6 +61,28 @@ activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	}
 end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.23.11",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Config stays in sync",
+				description = "New script settings now show up on the site automatically.",
+				icon = "refresh-cw",
+			},
+		},
+	},
+	{
+		version = "2026.07.23.10",
+		releasedAt = "July 23, 2026",
+		notes = {
+			{
+				title = "Safe Mode",
+				description = "Pauses automation, restores normal rendering, and removes the FPS cap without losing your saved setup.",
+				icon = "shield-check",
+			},
+		},
+	},
 	{
 		version = "2026.07.23.09",
 		releasedAt = "July 23, 2026",
@@ -276,6 +298,8 @@ pcall(function()
 end)
 local configFile = "1rzHubLiteConfig.json"
 local defaultConfig = {
+	safeMode = false,
+	safeModeSavedConfig = {},
 	autoCollectPresentRain = false,
 	selectedWorldChest = "Giant Chest",
 	autoClaimWorldChest = false,
@@ -402,6 +426,12 @@ local defaultConfig = {
 	chunkerRenderDistance = 4,
 	lastSeenScriptVersion = "",
 }
+activeStates.BGSI_Lite_SafeModePreservedKeys = {
+	safeMode = true,
+	safeModeSavedConfig = true,
+	dashboardSyncEnabled = true,
+	dashboardSyncAutoEnabled = true,
+}
 local legacyConfigFile = "1rzHubConfig.json"
 local Config
 -- Loads the saved config and falls back safely if the file is missing/broken.
@@ -478,6 +508,18 @@ end
 local function saveConfig()
 	if not writefile then
 		return
+	end
+	if Config and Config.safeMode == true and type(Config.safeModeSavedConfig) == "table" then
+		for configKey, defaultValue in pairs(defaultConfig) do
+			if
+				type(defaultValue) == "boolean"
+				and not activeStates.BGSI_Lite_SafeModePreservedKeys[configKey]
+				and Config[configKey] == true
+			then
+				Config.safeModeSavedConfig[configKey] = true
+				Config[configKey] = false
+			end
+		end
 	end
 	pcall(function()
 		writefile(configFile, HttpService:JSONEncode(Config))
@@ -613,7 +655,38 @@ Config.chunkerRenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRen
 Config.setfps = math.max(1, math.floor(tonumber(Config.setfps) or 60))
 _G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
 
+pcall(function()
+	if activeStates.BGSI_Lite_OriginalQualityLevel == nil then
+		activeStates.BGSI_Lite_OriginalQualityLevel = settings().Rendering.QualityLevel
+	end
+end)
+pcall(function()
+	if activeStates.BGSI_Lite_OriginalSavedQualityLevel == nil then
+		activeStates.BGSI_Lite_OriginalSavedQualityLevel =
+			UserSettings():GetService("UserGameSettings").SavedQualityLevel
+	end
+end)
 activeStates.BGSI_Lite_ApplyPerformanceSettings = function()
+	if Config.safeMode == true then
+		pcall(function()
+			if activeStates.BGSI_Lite_OriginalQualityLevel ~= nil then
+				settings().Rendering.QualityLevel = activeStates.BGSI_Lite_OriginalQualityLevel
+			end
+		end)
+		pcall(function()
+			if activeStates.BGSI_Lite_OriginalSavedQualityLevel ~= nil then
+				UserSettings():GetService("UserGameSettings").SavedQualityLevel =
+					activeStates.BGSI_Lite_OriginalSavedQualityLevel
+			end
+		end)
+		pcall(function()
+			local fpsCapFunction = rawget(activeStates, "setfpscap") or rawget(activeStates, "set_fps_cap")
+			if type(fpsCapFunction) == "function" then
+				fpsCapFunction(0)
+			end
+		end)
+		return
+	end
 	pcall(function()
 		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 	end)
@@ -627,7 +700,70 @@ activeStates.BGSI_Lite_ApplyPerformanceSettings = function()
 		end
 	end)
 end
-activeStates.BGSI_Lite_ApplyPerformanceSettings()
+activeStates.BGSI_Lite_SetSafeMode = function(enabled)
+	enabled = enabled == true
+	if enabled and Config.safeMode ~= true then
+		local snapshotOk, snapshot = pcall(function()
+			return HttpService:JSONDecode(HttpService:JSONEncode(Config))
+		end)
+		Config.safeModeSavedConfig = snapshotOk and type(snapshot) == "table" and snapshot or {}
+		Config.safeModeSavedConfig.safeMode = nil
+		Config.safeModeSavedConfig.safeModeSavedConfig = nil
+	end
+	if enabled then
+		Config.safeMode = true
+		for configKey, defaultValue in pairs(defaultConfig) do
+			if
+				type(defaultValue) == "boolean"
+				and not activeStates.BGSI_Lite_SafeModePreservedKeys[configKey]
+			then
+				Config[configKey] = false
+			end
+		end
+		Config.disableRendering = false
+		activeStates.BGSI_Lite_ActiveQuest = nil
+		activeStates.BGSI_Lite_SeasonActive = false
+		activeStates.BGSI_Lite_ChallengePassActive = false
+		activeStates.BGSI_Lite_GlobalIncentiveActive = false
+		activeStates.BGSI_Lite_GemGenieActive = false
+		activeStates.BGSI_Lite_TicketPickupActive = false
+		activeStates.BGSI_Lite_CarnivalPickupActive = false
+		activeStates.BGSI_Lite_LuckEggActive = false
+		activeStates.BGSI_Lite_SpecialRiftActive = false
+		activeStates.BGSI_Lite_IdleHatchFallbackActive = false
+	else
+		local savedConfig = type(Config.safeModeSavedConfig) == "table" and Config.safeModeSavedConfig or {}
+		for configKey, savedValue in pairs(savedConfig) do
+			if
+				defaultConfig[configKey] ~= nil
+				and configKey ~= "safeMode"
+				and configKey ~= "safeModeSavedConfig"
+				and typeof(savedValue) == typeof(defaultConfig[configKey])
+			then
+				Config[configKey] = savedValue
+			end
+		end
+		Config.safeMode = false
+		Config.safeModeSavedConfig = {}
+	end
+	_G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
+	pcall(function()
+		RunService:Set3dRenderingEnabled(enabled or not Config.disableRendering)
+	end)
+	pcall(function()
+		if type(activeStates.BGSI_Lite_ApplyHatchAnimationSetting) == "function" then
+			activeStates.BGSI_Lite_ApplyHatchAnimationSetting()
+		end
+	end)
+	activeStates.BGSI_Lite_ApplyPerformanceSettings()
+	refreshChunkerAroundPlayer()
+	saveConfig()
+end
+if Config.safeMode == true then
+	activeStates.BGSI_Lite_SetSafeMode(true)
+else
+	activeStates.BGSI_Lite_ApplyPerformanceSettings()
+end
 
 -- Current clients do not expose Workspace.StreamingTargetRadius. The game
 -- controls rendered objects through each Chunker's RenderDistance instead.
@@ -643,8 +779,15 @@ local function installChunkerRenderDistanceHook()
 
 	local originalUpdate = ChunkerModule._BGSI_CHUNKER_TRUE_UPDATE
 	ChunkerModule.Update = function(self, playerPosition, ...)
-		if Config.disableRendering ~= true and type(self) == "table" then
-			self.RenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRenderDistance) or 4))
+		if type(self) == "table" then
+			if rawget(self, "_BGSI_LITE_ORIGINAL_RENDER_DISTANCE") == nil then
+				self._BGSI_LITE_ORIGINAL_RENDER_DISTANCE = self.RenderDistance
+			end
+			if Config.safeMode == true then
+				self.RenderDistance = self._BGSI_LITE_ORIGINAL_RENDER_DISTANCE
+			elseif Config.disableRendering ~= true then
+				self.RenderDistance = math.max(1, math.floor(tonumber(Config.chunkerRenderDistance) or 4))
+			end
 		end
 		local updateResults = table.pack(pcall(originalUpdate, self, playerPosition, ...))
 		if updateResults[1] then
@@ -1061,6 +1204,9 @@ local networkRemote =
 local remoteEvent = networkRemote:WaitForChild("RemoteEvent")
 local remoteFunction = networkRemote:WaitForChild("RemoteFunction")
 activeStates.BGSI_Lite_FireGameRemote = function(actionName, ...)
+	if Config.safeMode == true then
+		return nil
+	end
 	if carnivalRemoteModule and type(carnivalRemoteModule.FireServer) == "function" then
 		return carnivalRemoteModule:FireServer(actionName, ...)
 	end
@@ -4159,6 +4305,20 @@ if type(getgenv) == "function" then
 		end
 	end
 end
+scriptStateDB:AddSection("Safety")
+scriptStateDB:AddToggle("SafeMode", {
+	Title = "Safe Mode",
+	Description = "Pause every automation feature and restore normal game performance without losing your setup.",
+	Default = Config.safeMode,
+	Callback = function(enabled)
+		activeStates.BGSI_Lite_SetSafeMode(enabled)
+		Interface:Notify({
+			Title = enabled and "Safe Mode enabled" or "Safe Mode disabled",
+			Content = enabled and "Automation is paused. Your settings are saved." or "Your saved setup has been restored.",
+			Duration = 4,
+		})
+	end,
+})
 scriptStateDB:AddChangelog()
 scriptStateOG:SelectTab(1)
 Interface:Notify({
@@ -8236,6 +8396,7 @@ do
 		local lastInventorySignature
 		activeStates.BGSI_Lite_DashboardPlayerDetailsSignature = nil
 		local dashboardConfigKeys = {
+			"safeMode",
 			-- Eggs
 			"selectedEgg",
 			"selectedEggLocationPriorities",
@@ -8357,8 +8518,27 @@ do
 			"dashboardSyncEnabled",
 		}
 		local dashboardConfigKeySet = {}
+		local dashboardPrivateConfigKeys = {
+			safeModeSavedConfig = true,
+			dashboardEndpoint = true,
+			dashboardIngestToken = true,
+			dashboardSyncAutoEnabled = true,
+			dashboardBestHatchName = true,
+			dashboardBestHatchChance = true,
+			lastSeenScriptVersion = true,
+		}
 		for _, configKey in ipairs(dashboardConfigKeys) do
-			dashboardConfigKeySet[configKey] = true
+			if not dashboardPrivateConfigKeys[configKey] then
+				dashboardConfigKeySet[configKey] = true
+			end
+		end
+		for configKey in pairs(defaultConfig) do
+			if not dashboardPrivateConfigKeys[configKey] then
+				dashboardConfigKeySet[configKey] = true
+				if not table.find(dashboardConfigKeys, configKey) then
+					table.insert(dashboardConfigKeys, configKey)
+				end
+			end
 		end
 
 		activeStates.BGSI_Lite_GetDashboardPetAssetId = function(pet, petInfo)
@@ -9047,7 +9227,16 @@ do
 						local dashboardConfig = {}
 						for _, configKey in ipairs(dashboardConfigKeys) do
 							if configKey ~= "webhookURL" then
-								dashboardConfig[configKey] = Config[configKey]
+								if
+									Config.safeMode == true
+									and configKey ~= "safeMode"
+									and type(Config.safeModeSavedConfig) == "table"
+									and Config.safeModeSavedConfig[configKey] ~= nil
+								then
+									dashboardConfig[configKey] = Config.safeModeSavedConfig[configKey]
+								else
+									dashboardConfig[configKey] = Config[configKey]
+								end
 							end
 						end
 						local playerData = profileStore:IsReady() and profileStore:Get() or nil
@@ -9063,6 +9252,9 @@ do
 					end
 
 					local function getDashboardActivity(currentEggName, isHatching)
+						if Config.safeMode == true then
+							return "Safe Mode", "idle"
+						end
 						local activeQuest = activeStates.BGSI_Lite_ActiveQuest
 						if type(activeQuest) == "table" and activeQuest.state ~= "complete" then
 							local progress = math.max(0, tonumber(activeQuest.progress) or 0)
@@ -9386,6 +9578,14 @@ do
 									local commandId = tonumber(dashboardCommand.id)
 									if commandId and not activeStates.BGSI_Lite_DashboardHandledCommands[commandId] then
 										activeStates.BGSI_Lite_DashboardHandledCommands[commandId] = true
+										if Config.safeMode == true and dashboardCommand.type ~= "apply-config" then
+											table.insert(pendingDashboardCommandResults, {
+												id = commandId,
+												success = false,
+												error = "Safe Mode is enabled",
+											})
+											continue
+										end
 										local commandSucceeded = false
 										local commandError = "Unsupported command"
 										local commandDeferred = false
@@ -9645,23 +9845,41 @@ do
 												for configKey, configValue in pairs(dashboardCommand.config) do
 													if
 														dashboardConfigKeySet[configKey]
+														and configKey ~= "safeMode"
 														and type(configValue) == type(defaultConfig[configKey])
 													then
-														Config[configKey] = configKey == "superLegendaryEnchantPriorities"
-																and activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(configValue)
-															or configValue
+														if configKey == "superLegendaryEnchantPriorities" then
+															configValue =
+																activeStates.BGSI_Lite_NormalizeSuperLegendaryEnchantPriorities(
+																	configValue
+																)
+														end
+														if
+															Config.safeMode == true
+															and type(Config.safeModeSavedConfig) == "table"
+														then
+															Config.safeModeSavedConfig[configKey] = configValue
+														else
+															Config[configKey] = configValue
+														end
 														appliedConfigCount = appliedConfigCount + 1
 													end
 												end
-											saveConfig()
+												if type(dashboardCommand.config.safeMode) == "boolean" then
+													activeStates.BGSI_Lite_SetSafeMode(dashboardCommand.config.safeMode)
+													appliedConfigCount = appliedConfigCount + 1
+												else
+													saveConfig()
+												end
 											activeStates.BGSI_Lite_LastQuestAutomationAt = tick()
 											activeStates.BGSI_Lite_LastAutoEnchantTeamAttempt = 0
 											activeStates.BGSI_Lite_AutoEnchantBlockedUntil = 0
 											clearDisabledPriorityStates()
 											_G.BGSI_CHUNK_RENDER_DISTANCE = Config.chunkerRenderDistance
 											pcall(function()
-												RunService:Set3dRenderingEnabled(not Config.disableRendering)
+												RunService:Set3dRenderingEnabled(Config.safeMode == true or not Config.disableRendering)
 											end)
+											activeStates.BGSI_Lite_ApplyPerformanceSettings()
 											pcall(installChunkerRenderDistanceHook)
 											pcall(refreshChunkerAroundPlayer)
 											print(
@@ -14306,7 +14524,7 @@ do
 			Config.disableRendering = scriptStateAT
 			saveConfig()
 			pcall(function()
-				RunService:Set3dRenderingEnabled(not scriptStateAT)
+				RunService:Set3dRenderingEnabled(Config.safeMode == true or not Config.disableRendering)
 			end)
 		end,
 	})
@@ -14345,7 +14563,7 @@ do
 		end,
 	})
 	pcall(function()
-		RunService:Set3dRenderingEnabled(not Config.disableRendering)
+		RunService:Set3dRenderingEnabled(Config.safeMode == true or not Config.disableRendering)
 	end)
 	activeStates.BGSI_Lite_ApplyPerformanceSettings()
 end
