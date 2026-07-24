@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.24.05"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.24.06"
 activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
 activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	activeStates.BGSI_Lite_DashboardLogSequence += 1
@@ -61,6 +61,17 @@ activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	}
 end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.24.06",
+		releasedAt = "July 24, 2026",
+		notes = {
+			{
+				title = "Loader compile fix",
+				description = "Low-FPS hatch bursts no longer add another top-level register to the loader.",
+				icon = "wrench",
+			},
+		},
+	},
 	{
 		version = "2026.07.24.05",
 		releasedAt = "July 24, 2026",
@@ -1607,28 +1618,25 @@ local function teleportToCFrame(targetCFrame)
 	teleportHumanoidRootPart.CFrame = targetCFrame
 	return true
 end
-local cachedMaxHatch, hatchStatsUtil
 local function getMaxHatchAmount()
 	local scriptStateVM
 	pcall(function()
 		if profileStore:IsReady() then
 			local scriptStateJE = profileStore:Get()
-			if not hatchStatsUtil then
-				hatchStatsUtil = require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+			if not activeStates.BGSI_Lite_HatchStatsUtil then
+				activeStates.BGSI_Lite_HatchStatsUtil =
+					require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
 			end
+			local hatchStatsUtil = activeStates.BGSI_Lite_HatchStatsUtil
 			if hatchStatsUtil and type(hatchStatsUtil.GetMaxEggHatches) == "function" then
 				scriptStateVM = hatchStatsUtil:GetMaxEggHatches(scriptStateJE)
 			end
 		end
 	end)
 	if type(scriptStateVM) == "number" and scriptStateVM >= 1 then
-		cachedMaxHatch = math.clamp(math.floor(scriptStateVM), 1, 12)
+		activeStates.BGSI_Lite_CachedMaxHatch = math.clamp(math.floor(scriptStateVM), 1, 12)
 	end
-	return cachedMaxHatch or 1
-end
-local function getHatchRequestBurstSize()
-	local configuredFps = math.max(1, tonumber(Config.setfps) or 60)
-	return math.clamp(math.ceil(60 / configuredFps), 1, 12)
+	return activeStates.BGSI_Lite_CachedMaxHatch or 1
 end
 local fallbackUtilityE
 local function safeGetChildren(targetObject)
@@ -2073,7 +2081,7 @@ local function fireHatchEgg(scriptStateQC)
 
 	local hatchRequestSucceeded = pcall(function()
 		local hatchAmount = getMaxHatchAmount()
-		for _ = 1, getHatchRequestBurstSize() do
+		for _ = 1, math.clamp(math.ceil(60 / math.max(1, tonumber(Config.setfps) or 60)), 1, 12) do
 			remoteEvent:FireServer("HatchEgg", scriptStateQC, hatchAmount)
 		end
 	end)
