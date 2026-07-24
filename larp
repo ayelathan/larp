@@ -50,7 +50,7 @@ local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local activeStates = (getgenv and getgenv()) or {}
-activeStates.BGSI_Lite_ScriptVersion = "2026.07.24.01"
+activeStates.BGSI_Lite_ScriptVersion = "2026.07.24.04"
 activeStates.BGSI_Lite_DashboardLogSequence = tonumber(activeStates.BGSI_Lite_DashboardLogSequence) or 0
 activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	activeStates.BGSI_Lite_DashboardLogSequence += 1
@@ -61,6 +61,39 @@ activeStates.BGSI_Lite_LogDashboardAction = function(message, level)
 	}
 end
 activeStates.BGSI_Lite_ReleaseHistory = {
+	{
+		version = "2026.07.24.04",
+		releasedAt = "July 24, 2026",
+		notes = {
+			{
+				title = "Game-timed hatching",
+				description = "Hatches now fire on the game's exact cooldown with full capacity, automatic rare-popup closing, and complete intro skipping.",
+				icon = "zap",
+			},
+		},
+	},
+	{
+		version = "2026.07.24.03",
+		releasedAt = "July 24, 2026",
+		notes = {
+			{
+				title = "Full hatch capacity",
+				description = "Every hatch request now uses the game's exact maximum egg count for the account.",
+				icon = "egg",
+			},
+		},
+	},
+	{
+		version = "2026.07.24.02",
+		releasedAt = "July 24, 2026",
+		notes = {
+			{
+				title = "Maximum hatch speed",
+				description = "Hatch requests and R + E input now run every available scheduler cycle.",
+				icon = "zap",
+			},
+		},
+	},
 	{
 		version = "2026.07.24.01",
 		releasedAt = "July 24, 2026",
@@ -805,52 +838,65 @@ activeStates.BGSI_Lite_SkipIntro = function()
 	if not playerGui then
 		return false
 	end
-	for _, guiObject in ipairs(playerGui:GetDescendants()) do
-		if guiObject:IsA("GuiButton") and guiObject.Visible then
-			local buttonText = string.lower(tostring(guiObject.Name or ""))
-			if guiObject:IsA("TextButton") then
-				buttonText = buttonText .. " " .. string.lower(tostring(guiObject.Text or ""))
-			end
-			local containerText = " " .. buttonText
-			local container = guiObject.Parent
-			for _ = 1, 5 do
-				if not container or container == playerGui then
-					break
-				end
-				containerText = containerText .. " " .. string.lower(tostring(container.Name or ""))
-				container = container.Parent
-			end
-			if
-				(
-					string.find(containerText, "intro", 1, true)
-					or string.find(containerText, "cutscene", 1, true)
-					or string.find(containerText, "loading", 1, true)
-					or string.find(containerText, "welcome", 1, true)
-				)
-				and (
-					string.find(buttonText, "skip", 1, true)
-					or string.find(buttonText, "play", 1, true)
-					or string.find(buttonText, "continue", 1, true)
-					or string.find(buttonText, "start", 1, true)
-				)
-			then
-				pcall(function()
-					guiObject:Activate()
-				end)
-				return true
-			end
-		end
+	local intro = playerGui:FindFirstChild("Intro")
+	if not intro or not intro.Enabled then
+		return false
+	end
+	local graphics = intro:FindFirstChild("Graphics")
+	local content = graphics and graphics:FindFirstChild("Content")
+	local low = content and content:FindFirstChild("Low")
+	local lowAction = low and low:FindFirstChild("Action")
+	local lowButton = lowAction and lowAction:FindFirstChild("Button")
+	if graphics and graphics.Visible and lowButton and lowButton:IsA("GuiButton") and lowButton.Visible then
+		pcall(function()
+			lowButton:Activate()
+		end)
+		return true
+	end
+	local play = intro:FindFirstChild("Play")
+	local playButton = play and play:FindFirstChild("Button")
+	if play and play.Visible and playButton and playButton:IsA("GuiButton") and playButton.Visible then
+		pcall(function()
+			playButton:Activate()
+		end)
+		return true
 	end
 	return false
 end
 task.spawn(function()
-	local introDeadline = tick() + 20
+	local introDeadline = tick() + 60
 	repeat
-		if activeStates.BGSI_Lite_SkipIntro() then
-			return
-		end
-		task.wait(0.2)
+		activeStates.BGSI_Lite_SkipIntro()
+		task.wait(0.1)
 	until tick() >= introDeadline or not isCurrentRun()
+end)
+activeStates.BGSI_Lite_CloseRareHatchPopup = function()
+	if Config.safeMode == true then
+		return false
+	end
+	local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+	local screenGui = playerGui and playerGui:FindFirstChild("ScreenGui")
+	local afkReveal = screenGui and screenGui:FindFirstChild("AFKReveal")
+	local closeButton = afkReveal and afkReveal:FindFirstChild("Close")
+	if
+		not afkReveal
+		or afkReveal.Visible ~= true
+		or not closeButton
+		or not closeButton:IsA("GuiButton")
+		or closeButton.Visible ~= true
+	then
+		return false
+	end
+	pcall(function()
+		closeButton:Activate()
+	end)
+	return true
+end
+task.spawn(function()
+	while isCurrentRun() do
+		task.wait(0.05)
+		activeStates.BGSI_Lite_CloseRareHatchPopup()
+	end
 end)
 
 -- Current clients do not expose Workspace.StreamingTargetRadius. The game
@@ -1550,30 +1596,24 @@ local function teleportToCFrame(targetCFrame)
 	teleportHumanoidRootPart.CFrame = targetCFrame
 	return true
 end
-local cachedMaxHatch, cacheHatchTime = nil, 0
+local cachedMaxHatch, hatchStatsUtil
 local function getMaxHatchAmount()
-	if cachedMaxHatch and tick() - cacheHatchTime < 5 then
-		return cachedMaxHatch
-	end
 	local scriptStateVM
 	pcall(function()
 		if profileStore:IsReady() then
 			local scriptStateJE = profileStore:Get()
-			scriptStateVM = scriptStateJE
-				and (
-					scriptStateJE.MaxHatch
-					or scriptStateJE.HatchLimit
-					or scriptStateJE.HatchAmount
-					or (scriptStateJE.Upgrades and scriptStateJE.Upgrades.HatchAmount)
-					or (scriptStateJE.Stats and scriptStateJE.Stats.MaxHatch)
-				)
+			if not hatchStatsUtil then
+				hatchStatsUtil = require(ReplicatedStorage.Shared.Utils.Stats.StatsUtil)
+			end
+			if hatchStatsUtil and type(hatchStatsUtil.GetMaxEggHatches) == "function" then
+				scriptStateVM = hatchStatsUtil:GetMaxEggHatches(scriptStateJE)
+			end
 		end
 	end)
-	if type(scriptStateVM) ~= "number" or scriptStateVM < 1 then
-		scriptStateVM = 80
+	if type(scriptStateVM) == "number" and scriptStateVM >= 1 then
+		cachedMaxHatch = math.clamp(math.floor(scriptStateVM), 1, 12)
 	end
-	cachedMaxHatch, cacheHatchTime = scriptStateVM, tick()
-	return scriptStateVM
+	return cachedMaxHatch or 1
 end
 local fallbackUtilityE
 local function safeGetChildren(targetObject)
@@ -2010,22 +2050,8 @@ local function fireHatchEgg(scriptStateQC)
 	end
 
 	local requestTime = tick()
-	local minimumHatchDelay = Config.adaptiveHatch == true
-			and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.02, 0.015, 0.04)
-		or 0.03
-	if requestTime - (tonumber(activeStates.BGSI_Lite_LastHatchAttemptAt) or 0) < minimumHatchDelay then
-		return false
-	end
-	local lastRequestAt = tonumber(activeStates.BGSI_Lite_LastHatchRequestAt) or 0
-	local lastAcceptedAt = tonumber(activeStates.BGSI_Lite_LastHatchAcceptedAt) or 0
-	local acceptedInterval = tonumber(activeStates.BGSI_Lite_AcceptedHatchInterval) or 0.35
-	if requestTime < (tonumber(activeStates.BGSI_Lite_NextHatchRequestAt) or 0) then
-		return false
-	end
-	if
-		lastRequestAt > lastAcceptedAt
-		and requestTime - lastRequestAt < math.clamp(acceptedInterval * 0.12, 0.035, 0.06)
-	then
+	local nextEggOpenAt = tonumber(LocalPlayer:GetAttribute("NextEggOpenAt")) or 0
+	if getCurrentTimestamp() < nextEggOpenAt then
 		return false
 	end
 	activeStates.BGSI_Lite_LastHatchAttemptAt = requestTime
@@ -5311,21 +5337,13 @@ task.spawn(function()
 	local observedHatchCount
 	local lastSelectedEgg
 	activeStates.BGSI_Lite_AdaptiveHatchDelay = math.clamp(
-		tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.02,
-		0.015,
-		0.04
+		tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.005,
+		0.005,
+		0.015
 	)
 	while isCurrentRun() do
 		local shouldMaintainHatching = activeStates.BGSI_Lite_ShouldMaintainHatching()
-		task.wait(
-			shouldMaintainHatching
-					and (
-						Config.adaptiveHatch == true
-								and math.clamp(tonumber(activeStates.BGSI_Lite_AdaptiveHatchDelay) or 0.02, 0.015, 0.04)
-							or 0.03
-					)
-				or 0.85
-		)
+		task.wait(shouldMaintainHatching and 0 or 0.85)
 		shouldMaintainHatching = activeStates.BGSI_Lite_ShouldMaintainHatching()
 		activeStates.BGSI_Lite_IdleHatchFallbackActive =
 			shouldMaintainHatching and Config.autoHatch ~= true
@@ -5413,14 +5431,8 @@ task.spawn(function()
 end)
 task.spawn(function()
 	while isCurrentRun() do
-		task.wait(Config.autoSpamR and 0.05 or 0.85)
-		if
-			Config.autoSpamR ~= true
-			or (
-				type(activeStates.BGSI_Lite_ShouldMaintainHatching) == "function"
-				and activeStates.BGSI_Lite_ShouldMaintainHatching()
-			)
-		then
+		task.wait(Config.autoSpamR and 0 or 0.85)
+		if Config.autoSpamR ~= true then
 			continue
 		end
 		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
@@ -13701,19 +13713,13 @@ activeStates.BGSI_Lite_InstallPetWebhookListener = function()
 							activeStates.BGSI_Lite_AcceptedHatchInterval =
 								previousInterval * 0.7 + hatchInterval * 0.3
 							activeStates.BGSI_Lite_AdaptiveHatchDelay = math.clamp(
-								activeStates.BGSI_Lite_AcceptedHatchInterval * 0.06,
-								0.015,
-								0.04
+								activeStates.BGSI_Lite_AcceptedHatchInterval * 0.02,
+								0.005,
+								0.015
 							)
 						end
 					end
 					activeStates.BGSI_Lite_LastHatchAcceptedAt = hatchAcceptedAt
-					activeStates.BGSI_Lite_NextHatchRequestAt = hatchAcceptedAt
-						+ math.clamp(
-							(tonumber(activeStates.BGSI_Lite_AcceptedHatchInterval) or 0.35) * 0.25,
-							0.03,
-							0.1
-						)
 				end
 				activeStates.BGSI_Lite_LastHatchEventAt = hatchAcceptedAt
 				for _, dashboardHatchPet in ipairs(scriptStatePO) do
